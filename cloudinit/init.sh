@@ -160,7 +160,7 @@ duckdb ~/.local/ohcaptain/data.duckdb "
 
   CREATE TABLE IF NOT EXISTS inbox (
     id TEXT PRIMARY KEY,
-    created_at TEXT DEFAULT (datetime('now')),
+    created_at TIMESTAMP DEFAULT current_timestamp,
     status TEXT DEFAULT 'unread',
     command TEXT,
     exit_code INTEGER,

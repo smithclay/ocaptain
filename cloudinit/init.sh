@@ -150,6 +150,7 @@ mkdir -p ~/.local/ohcaptain/bin
 export PATH="$HOME/.local/ohcaptain/bin:$PATH"
 
 log "Initializing ohcaptain database..."
+SHIP_HOSTNAME=$(hostname -f 2>/dev/null || hostname)
 duckdb ~/.local/ohcaptain/data.duckdb "
   CREATE TABLE IF NOT EXISTS config (
     key TEXT PRIMARY KEY,
@@ -157,11 +158,15 @@ duckdb ~/.local/ohcaptain/data.duckdb "
   );
   INSERT INTO config (key, value) VALUES ('POLL_INTERVAL_SEC', '10')
     ON CONFLICT (key) DO NOTHING;
+  INSERT INTO config (key, value) VALUES ('IDENTITY', 'captain@$SHIP_HOSTNAME')
+    ON CONFLICT (key) DO NOTHING;
 
   CREATE TABLE IF NOT EXISTS inbox (
     id TEXT PRIMARY KEY,
     created_at TIMESTAMP DEFAULT current_timestamp,
     status TEXT DEFAULT 'unread',
+    sender TEXT,
+    recipient TEXT NOT NULL,
     command TEXT,
     exit_code INTEGER,
     result TEXT,
@@ -176,16 +181,26 @@ set -uo pipefail
 
 DB=~/.local/ohcaptain/data.duckdb
 
-get_poll_interval() {
-  duckdb "$DB" -noheader -csv \
-    "SELECT value FROM config WHERE key = 'POLL_INTERVAL_SEC'" 2>/dev/null || echo "10"
+get_config() {
+  duckdb "$DB" -noheader -csv "SELECT value FROM config WHERE key = '$1'" 2>/dev/null
 }
 
+get_poll_interval() {
+  get_config "POLL_INTERVAL_SEC" || echo "10"
+}
+
+get_identity() {
+  get_config "IDENTITY"
+}
+
+IDENTITY=$(get_identity)
+[ -z "$IDENTITY" ] && { echo "ERROR: No IDENTITY in config"; exit 1; }
+
 while true; do
-  # Claim one unread message
+  # Claim one unread message addressed to this ship
   msg=$(duckdb "$DB" -json "
     UPDATE inbox SET status = 'running'
-    WHERE id = (SELECT id FROM inbox WHERE status = 'unread' LIMIT 1)
+    WHERE id = (SELECT id FROM inbox WHERE status = 'unread' AND recipient = '$IDENTITY' LIMIT 1)
     RETURNING id, command
   " 2>/dev/null)
 
@@ -218,16 +233,21 @@ set -uo pipefail
 
 DB=~/.local/ohcaptain/data.duckdb
 
+get_identity() {
+  duckdb "$DB" -noheader -csv "SELECT value FROM config WHERE key = 'IDENTITY'" 2>/dev/null
+}
+
 usage() {
   echo "Usage: ohcaptain-inbox <command> [args]"
   echo ""
   echo "Commands:"
-  echo "  list [--status <status>]  List inbox messages"
-  echo "  send <command>            Send a command to the inbox"
-  echo "  read <id>                 Mark message as pending (claim it)"
-  echo "  done <id>                 Mark message as done"
-  echo "  error <id> <message>      Mark message as error"
-  echo "  delete <id>               Delete a message"
+  echo "  list [--status <status>]        List inbox messages"
+  echo "  send <recipient> <command>      Send a command (recipient: captain@host or commodore@host)"
+  echo "  read <id>                       Mark message as pending (claim it)"
+  echo "  done <id>                       Mark message as done"
+  echo "  error <id> <message>            Mark message as error"
+  echo "  delete <id>                     Delete a message"
+  echo "  identity                        Show this ship's identity"
   exit 1
 }
 
@@ -242,14 +262,22 @@ case "$cmd" in
     if [ "${1:-}" = "--status" ] && [ -n "${2:-}" ]; then
       status_filter="WHERE status = '$2'"
     fi
-    duckdb "$DB" -box "SELECT id, status, command, exit_code, created_at FROM inbox $status_filter ORDER BY created_at DESC"
+    duckdb "$DB" -box "SELECT id, status, sender, recipient, command, exit_code, created_at FROM inbox $status_filter ORDER BY created_at DESC"
     ;;
   send)
-    [ $# -lt 1 ] && { echo "Usage: ohcaptain-inbox send <command>"; exit 1; }
+    [ $# -lt 2 ] && { echo "Usage: ohcaptain-inbox send <recipient> <command>"; echo "  recipient: captain@<hostname> or commodore@<hostname>"; exit 1; }
+    recipient="$1"
+    command="$2"
+    # Validate recipient format
+    if ! echo "$recipient" | grep -qE '^(captain|commodore)@.+$'; then
+      echo "ERROR: Invalid recipient format. Use captain@<hostname> or commodore@<hostname>"
+      exit 1
+    fi
     id=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)
-    escaped_cmd=$(printf '%s' "$1" | sed "s/'/''/g")
-    duckdb "$DB" "INSERT INTO inbox (id, command) VALUES ('$id', '$escaped_cmd')"
-    echo "Message queued: $id"
+    sender=$(get_identity)
+    escaped_cmd=$(printf '%s' "$command" | sed "s/'/''/g")
+    duckdb "$DB" "INSERT INTO inbox (id, sender, recipient, command) VALUES ('$id', '$sender', '$recipient', '$escaped_cmd')"
+    echo "Message queued: $id -> $recipient"
     ;;
   read)
     [ $# -lt 1 ] && { echo "Usage: ohcaptain-inbox read <id>"; exit 1; }
@@ -271,6 +299,9 @@ case "$cmd" in
     [ $# -lt 1 ] && { echo "Usage: ohcaptain-inbox delete <id>"; exit 1; }
     duckdb "$DB" "DELETE FROM inbox WHERE id = '$1'"
     echo "Deleted: $1"
+    ;;
+  identity)
+    get_identity
     ;;
   *)
     usage

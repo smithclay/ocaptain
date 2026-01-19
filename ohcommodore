@@ -124,7 +124,9 @@ cmd_ship_create() {
   local name="${repo##*/}"
   log "Creating ship '$name' for $repo..."
 
-  ssh_dest=$(flagship_ssh "GH_TOKEN='$GH_TOKEN' ~/.ohcommodore/bin/ship-create '$repo'")
+  local init_url_env=""
+  [[ -n "${INIT_URL:-}" ]] && init_url_env="INIT_URL='$INIT_URL'"
+  ssh_dest=$(flagship_ssh "GH_TOKEN='$GH_TOKEN' $init_url_env ~/.ohcommodore/bin/ship-create '$repo'")
 
   log "Ship ready: $ssh_dest"
 }

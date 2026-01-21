@@ -813,15 +813,36 @@ _ship_destroy_impl() {
 
 cmd_ship_ssh() {
   need_flagship
-  local name="$1"
-  [[ -n "$name" ]] || die "Usage: ohcommodore ship ssh <name>"
+  local prefix="$1"
+  [[ -n "$prefix" ]] || die "Usage: ohcommodore ship ssh <prefix>"
 
-  local escaped_name dest
-  escaped_name=$(sql_escape "$name")
-  dest=$(flagship_ssh "duckdb ~/.ohcommodore/ns/${OHCOM_NS:-default}/data.duckdb -noheader -csv \"SELECT ssh_dest FROM fleet WHERE name = '$escaped_name'\"" 2>/dev/null)
-  [[ -n "$dest" ]] || die "Ship '$name' not found"
+  local escaped_prefix
+  escaped_prefix=$(sql_escape "$prefix")
 
-  exec ssh -o StrictHostKeyChecking=accept-new "$dest"
+  # Get matching ships
+  local matches
+  matches=$(flagship_ssh "duckdb ~/.ohcommodore/ns/${OHCOM_NS:-default}/data.duckdb -noheader -csv \"SELECT id, ssh_dest FROM ships WHERE id LIKE '${escaped_prefix}%'\"" 2>/dev/null)
+
+  local count
+  if [[ -z "$matches" ]]; then
+    count=0
+  else
+    count=$(echo "$matches" | wc -l | tr -d ' ')
+  fi
+
+  case "$count" in
+    0) die "No ship matches '$prefix'" ;;
+    1)
+      local dest
+      dest=$(echo "$matches" | cut -d',' -f2)
+      exec ssh -o StrictHostKeyChecking=accept-new "$dest"
+      ;;
+    *)
+      local ids
+      ids=$(echo "$matches" | cut -d',' -f1 | tr '\n' ' ')
+      die "Multiple ships match '$prefix': $ids"
+      ;;
+  esac
 }
 
 cmd_fleet_sink() {

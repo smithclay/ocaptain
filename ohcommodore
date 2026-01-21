@@ -123,6 +123,91 @@ write_msg_file() {
   echo "$finalfile"
 }
 
+deliver_msg_file() {
+  local local_path="$1"
+  local dest_ssh="$2"
+  local max_retries="${3:-3}"
+
+  local filename
+  filename=$(basename "$local_path")
+
+  local remote_incoming remote_inbound
+  remote_incoming='$HOME/.ohcommodore/ns/default/q/inbound/.incoming'
+  remote_inbound='$HOME/.ohcommodore/ns/default/q/inbound'
+
+  local attempt=1
+  local delay=1
+
+  while [[ $attempt -le $max_retries ]]; do
+    # Ensure remote directories exist
+    if ssh -o BatchMode=yes "$dest_ssh" "mkdir -p $remote_incoming $remote_inbound" 2>/dev/null; then
+      # SCP to .incoming (staging)
+      if scp -q "$local_path" "${dest_ssh}:${remote_incoming}/${filename}" 2>/dev/null; then
+        # Atomic rename to publish
+        if ssh -o BatchMode=yes "$dest_ssh" "mv ${remote_incoming}/${filename} ${remote_inbound}/${filename}" 2>/dev/null; then
+          rm -f "$local_path"
+          return 0
+        fi
+      fi
+    fi
+
+    log "Delivery attempt $attempt/$max_retries failed, retrying in ${delay}s..."
+    sleep "$delay"
+    delay=$((delay * 2))
+    attempt=$((attempt + 1))
+  done
+
+  log "ERROR: Failed to deliver message after $max_retries attempts"
+  return 1
+}
+
+ingest_queue_file() {
+  local file_path="$1"
+  local db
+  db="$(msg_db)"
+
+  # Parse JSON
+  local msg_id created_at source dest topic job_id lease_token payload_json
+  msg_id=$(jq -r '.message_id' "$file_path")
+  created_at=$(jq -r '.created_at' "$file_path")
+  source=$(jq -r '.source' "$file_path")
+  dest=$(jq -r '.dest' "$file_path")
+  topic=$(jq -r '.topic' "$file_path")
+  job_id=$(jq -r '.job_id // empty' "$file_path")
+  lease_token=$(jq -r '.lease_token // empty' "$file_path")
+  payload_json=$(jq -c '.payload' "$file_path")
+
+  # Escape for SQL
+  local esc_msg_id esc_source esc_dest esc_topic esc_job_id esc_lease_token esc_payload
+  esc_msg_id=$(sql_escape "$msg_id")
+  esc_source=$(sql_escape "$source")
+  esc_dest=$(sql_escape "$dest")
+  esc_topic=$(sql_escape "$topic")
+  esc_job_id=$(sql_escape "$job_id")
+  esc_lease_token=$(sql_escape "$lease_token")
+  esc_payload=$(sql_escape "$payload_json")
+
+  # Insert with ON CONFLICT for idempotency
+  if duckdb "$db" "
+    INSERT INTO messages (message_id, created_at, source, dest, topic, job_id, lease_token, payload_json)
+    VALUES ('$esc_msg_id', '$created_at', '$esc_source', '$esc_dest', '$esc_topic',
+            $([ -n "$job_id" ] && echo "'$esc_job_id'" || echo "NULL"),
+            $([ -n "$lease_token" ] && echo "'$esc_lease_token'" || echo "NULL"),
+            '$esc_payload')
+    ON CONFLICT (message_id) DO NOTHING;
+  " 2>/dev/null; then
+    # Ack: remove file
+    rm -f "$file_path"
+  else
+    # Deadletter: move to dead queue with reason
+    local filename
+    filename=$(basename "$file_path")
+    mv "$file_path" "$(q_dead)/$filename"
+    echo "DuckDB insert failed" > "$(q_dead)/${filename%.json}.reason"
+    die "Failed to ingest message $msg_id - moved to deadletter"
+  fi
+}
+
 need_flagship() {
   [[ -f "$CONFIG_FILE" ]] || die "No flagship configured. Run: ohcommodore init"
 }

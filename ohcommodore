@@ -208,6 +208,90 @@ ingest_queue_file() {
   fi
 }
 
+# Daemon support functions (v2 queue system)
+DAEMON_SHUTDOWN=0
+
+daemon_shutdown_handler() {
+  log "Shutdown signal received, finishing current work..."
+  DAEMON_SHUTDOWN=1
+}
+
+daemon_recover_claimed() {
+  local inbound claimed_file filename age_seconds threshold_seconds
+  inbound="$(q_inbound)"
+  threshold_seconds=300  # 5 minutes
+
+  for claimed_file in "$inbound"/.claimed.*.json; do
+    [[ -f "$claimed_file" ]] || continue
+
+    filename=$(basename "$claimed_file")
+    filename="${filename#.claimed.}"  # Remove .claimed. prefix
+
+    # Get file age in seconds
+    if [[ "$(uname)" == "Darwin" ]]; then
+      age_seconds=$(( $(date +%s) - $(stat -f %m "$claimed_file") ))
+    else
+      age_seconds=$(( $(date +%s) - $(stat -c %Y "$claimed_file") ))
+    fi
+
+    if [[ $age_seconds -gt $threshold_seconds ]]; then
+      # Too old - deadletter
+      mv "$claimed_file" "$(q_dead)/$filename"
+      echo "Abandoned claim (age: ${age_seconds}s, exceeded ${threshold_seconds}s threshold)" > "$(q_dead)/${filename%.json}.reason"
+      log "Deadlettered abandoned claim: $filename"
+    else
+      # Recent - retry
+      mv "$claimed_file" "$inbound/$filename"
+      log "Recovered claimed file for retry: $filename"
+    fi
+  done
+}
+
+daemon_claim_one() {
+  local inbound file filename claimed_path
+  inbound="$(q_inbound)"
+
+  # Find first visible message file
+  for file in "$inbound"/msg.*.json; do
+    [[ -f "$file" ]] || continue
+
+    filename=$(basename "$file")
+    claimed_path="$inbound/.claimed.$filename"
+
+    # Atomic claim via rename
+    if mv "$file" "$claimed_path" 2>/dev/null; then
+      echo "$claimed_path"
+      return 0
+    fi
+  done
+
+  # No messages to claim
+  return 1
+}
+
+daemon_exec_cmd() {
+  local cmd="$1"
+  local cwd="$2"
+  local env_json="$3"
+  local timeout_s="${4:-1800}"
+
+  local result exit_code
+
+  # Expand ~ in cwd
+  cwd="${cwd/#\~/$HOME}"
+
+  # Change to working directory if specified
+  if [[ -n "$cwd" && -d "$cwd" ]]; then
+    cd "$cwd"
+  fi
+
+  # Execute with timeout
+  result=$(timeout "$timeout_s" bash -c "$cmd" 2>&1) && exit_code=$? || exit_code=$?
+
+  echo "$result"
+  return $exit_code
+}
+
 need_flagship() {
   [[ -f "$CONFIG_FILE" ]] || die "No flagship configured. Run: ohcommodore init"
 }

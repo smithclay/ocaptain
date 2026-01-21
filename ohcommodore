@@ -905,6 +905,11 @@ EOF
   # Create common tables (config and inbox)
   _init_common_tables "commodore@$flagship_hostname"
 
+  # Initialize v2 queue system
+  log "Initializing v2 queue system..."
+  queue_init_dirs
+  init_messages_db
+
   log "Commodore initialized."
 }
 
@@ -941,6 +946,11 @@ EOF
 
   # Create common tables (config and inbox)
   _init_common_tables "captain@$ship_hostname"
+
+  # Initialize v2 queue system
+  log "Initializing v2 queue system..."
+  queue_init_dirs
+  init_messages_db
 
   log "Captain initialized${repo:+ for $repo}."
 }

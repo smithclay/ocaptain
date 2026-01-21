@@ -1,0 +1,114 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+ohcommodore is a lightweight multi-coding agent control plane built on exe.dev VMs. It manages a fleet of pre-configured VMs with source code checked out, using a nautical-themed architecture.
+
+## Architecture
+
+```
+Commodore (local CLI: ./ohcommodore)
+    │
+    │ SSH
+    ▼
+Flagship (exe.dev VM, long-running coordinator)
+    │ Stores fleet in DuckDB, manages ships via SSH
+    │
+    │ SSH
+    ▼
+Ships (exe.dev VMs, one per GitHub repo)
+```
+
+**Key design principle**: Minimal external dependencies (bash, ssh, scp, duckdb). All communication happens over SSH.
+
+## File Structure
+
+| Path | Purpose |
+|------|---------|
+| `ohcommodore` | Main CLI script (runs everywhere: local, flagship, ships) |
+| `cloudinit/init.sh` | OS-level initialization (apt, tools, zsh, etc.) |
+
+**Identity detection:** `~/.ohcommodore/identity.json` with `{"role":"local|commodore|captain"}`
+
+**Local config:** `~/.ohcommodore/config.json` stores flagship SSH destination (local only)
+
+**VM state:** `~/.local/ship/data.duckdb` stores fleet registry (flagship) and inbox (all VMs)
+
+## Commands
+
+```bash
+# Bootstrap flagship VM (requires GH_TOKEN)
+GH_TOKEN=... ./ohcommodore init
+
+# Fleet management
+./ohcommodore fleet status
+./ohcommodore fleet sink              # Destroy all ships (prompts for confirmation)
+./ohcommodore fleet sink --scuttle    # Destroy ships + flagship
+
+# Ship management (requires GH_TOKEN env var for create)
+GH_TOKEN=... ./ohcommodore ship create owner/repo
+./ohcommodore ship ssh reponame
+./ohcommodore ship destroy reponame
+```
+
+### Inbox Commands (run on ships via `ship-inbox`)
+
+```bash
+# List inbox messages
+ship-inbox list
+ship-inbox list --status done
+
+# Send a command to another ship
+ship-inbox send captain@other-ship "cargo test"
+
+# Send a command to the commodore (note: commands are executed as shell commands)
+ship-inbox send commodore@flagship-host "echo 'Report from ship: all systems operational'"
+
+# Get this ship's identity
+ship-inbox identity
+
+# Manual message management
+ship-inbox read <id>       # Claim message (mark pending)
+ship-inbox done <id>       # Mark as completed
+ship-inbox error <id> "msg" # Mark as failed
+ship-inbox delete <id>     # Remove message
+```
+
+## Environment Variables
+
+| Variable | Where Used | Description |
+|----------|------------|-------------|
+| `GH_TOKEN` | init, ship create, cloudinit | GitHub PAT for repo access (required) |
+| `TARGET_REPO` | cloudinit | Repository to clone (e.g., `owner/repo`) |
+| `INIT_PATH` | init, ship create | Local path to init script (scp'd to VMs, overrides `INIT_URL`) |
+| `INIT_URL` | init, ship create | Override the init script URL |
+| `DOTFILES_PATH` | init, ship create | Local dotfiles directory (scp'd to VMs, highest priority) |
+| `DOTFILES_URL` | init, ship create, cloudinit | Dotfiles repo URL (default: `https://github.com/smithclay/ohcommodore`) |
+| `ROLE` | cloudinit | Identity role: `captain` (ships) or `commodore` (flagship) |
+
+## Ship Initialization
+
+When a ship is created, `cloudinit/init.sh` runs and installs:
+- GitHub CLI with authenticated token
+- Target repository cloned to `~/<repo-name>`
+- Zellij terminal multiplexer
+- Rust toolchain via rustup
+- Oh My Zsh with zsh as default shell
+- Dotfiles via chezmoi
+- DuckDB CLI and inbox system (`ship-inbox`, `ship-scheduler`)
+
+## Inbox System
+
+The inbox enables asynchronous inter-ship communication via DuckDB databases.
+
+**Architecture:** Each ship has a local DuckDB database. When sending a message, the sender SSHs to the recipient host and executes a DuckDB INSERT command directly on their inbox table.
+
+**Components:**
+- `ship-inbox` - CLI for sending/managing messages (uses SSH for remote database access)
+- `ship-scheduler` - Background daemon that executes pending commands (systemd user service)
+
+**Message flow:** `unread` → `running` → `done`/`error`
+
+**Recipient format:** `captain@<hostname>` or `commodore@<hostname>`

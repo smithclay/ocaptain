@@ -771,17 +771,17 @@ _ship_create_impl() {
 }
 
 cmd_ship_destroy() {
-  local name="$1"
-  [[ -n "$name" ]] || die "Usage: ohcommodore ship destroy <name>"
+  local prefix="$1"
+  [[ -n "$prefix" ]] || die "Usage: ohcommodore ship destroy <prefix>"
 
   case "$(get_role)" in
     local)
       need_flagship
-      log "Destroying ship '$name' (via flagship)..."
-      flagship_ssh "~/.local/bin/ohcommodore ship destroy $(printf %q "$name")"
+      log "Destroying ship matching '$prefix' (via flagship)..."
+      flagship_ssh "~/.local/bin/ohcommodore ship destroy $(printf %q "$prefix")"
       ;;
     commodore)
-      _ship_destroy_impl "$name"
+      _ship_destroy_impl "$prefix"
       ;;
     captain)
       die "Cannot destroy ships from a ship"
@@ -790,25 +790,25 @@ cmd_ship_destroy() {
 }
 
 _ship_destroy_impl() {
-  local name="$1"
-  local escaped_name
-  escaped_name=$(sql_escape "$name")
+  local prefix="$1"
 
-  local ship_pubkey
-  ship_pubkey=$(duckdb "$(msg_db)" -noheader -csv "SELECT pubkey FROM fleet WHERE name = '$escaped_name'" 2>/dev/null || echo "")
+  # Resolve prefix to ship ID
+  local ship_id
+  ship_id=$(resolve_ship_prefix "$prefix")
 
-  log "Removing VM ship-${name}..."
-  timeout 30 ssh exe.dev rm "ship-${name}" || log "Warning: VM removal timed out or failed"
+  local escaped_id
+  escaped_id=$(sql_escape "$ship_id")
 
-  if [[ -n "$ship_pubkey" ]]; then
-    log "Removing ship SSH key from exe.dev..."
-    timeout 30 ssh exe.dev ssh-key remove "$ship_pubkey" 2>/dev/null || true
-  fi
+  log "Setting status to destroying..."
+  duckdb "$(msg_db)" "UPDATE ships SET status = 'destroying' WHERE id = '$escaped_id'"
 
-  log "Removing from fleet registry..."
-  duckdb "$(msg_db)" "DELETE FROM fleet WHERE name = '$escaped_name'"
+  log "Removing VM ship-${ship_id}..."
+  timeout 30 ssh exe.dev rm "ship-${ship_id}" || log "Warning: VM removal timed out or failed"
 
-  log "Ship '$name' destroyed."
+  log "Removing from ships registry..."
+  duckdb "$(msg_db)" "DELETE FROM ships WHERE id = '$escaped_id'"
+
+  log "Ship '$ship_id' destroyed."
 }
 
 cmd_ship_ssh() {

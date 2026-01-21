@@ -292,6 +292,118 @@ daemon_exec_cmd() {
   return $exit_code
 }
 
+emit_cmd_result() {
+  local request_id="$1"
+  local exit_code="$2"
+  local stdout_path="$3"
+  local stderr_path="$4"
+  local started_at="$5"
+  local ended_at="$6"
+  local dest="$7"
+
+  local hostname
+  hostname=$(hostname -f 2>/dev/null || hostname)
+
+  # Build paths that include hostname (artifacts stay on ship)
+  local remote_stdout_path remote_stderr_path
+  remote_stdout_path="${hostname}:${stdout_path}"
+  remote_stderr_path="${hostname}:${stderr_path}"
+
+  local payload_json
+  payload_json=$(jq -n \
+    --arg request_id "$request_id" \
+    --argjson exit_code "$exit_code" \
+    --arg stdout_path "$remote_stdout_path" \
+    --arg stderr_path "$remote_stderr_path" \
+    --arg started_at "$started_at" \
+    --arg ended_at "$ended_at" \
+    '{
+      request_id: $request_id,
+      exit_code: $exit_code,
+      stdout_path: $stdout_path,
+      stderr_path: $stderr_path,
+      started_at: $started_at,
+      ended_at: $ended_at
+    }')
+
+  write_msg_file "cmd.result" "$dest" "$payload_json"
+}
+
+daemon_process_one() {
+  local my_identity="$1"
+
+  # Claim a message
+  local claimed_file
+  claimed_file=$(daemon_claim_one) || return 1
+
+  # Ingest into database
+  ingest_queue_file "$claimed_file" 2>/dev/null || {
+    # Already handled in ingest_queue_file (deadlettered)
+    return 1
+  }
+
+  # Find unhandled cmd.exec messages for us
+  local msg_row
+  msg_row=$(duckdb "$(msg_db)" -json "
+    SELECT message_id, payload_json
+    FROM messages
+    WHERE dest = '$my_identity'
+      AND topic = 'cmd.exec'
+      AND handled_at IS NULL
+    ORDER BY created_at
+    LIMIT 1
+  " 2>/dev/null)
+
+  [[ -n "$msg_row" && "$msg_row" != "[]" ]] || return 0
+
+  local msg_id payload_json cmd cwd timeout_s request_id source
+  msg_id=$(echo "$msg_row" | jq -r '.[0].message_id')
+  payload_json=$(echo "$msg_row" | jq -r '.[0].payload_json')
+
+  cmd=$(echo "$payload_json" | jq -r '.cmd')
+  cwd=$(echo "$payload_json" | jq -r '.cwd // "~"')
+  timeout_s=$(echo "$payload_json" | jq -r '.timeout_s // 1800')
+  request_id=$(echo "$payload_json" | jq -r '.request_id // empty')
+
+  # Get source for reply
+  source=$(duckdb "$(msg_db)" -noheader -csv "SELECT source FROM messages WHERE message_id='$msg_id'" 2>/dev/null)
+
+  # Create artifact directory
+  local artifact_dir started_at ended_at
+  artifact_dir="$(artifacts_root)/${request_id:-$msg_id}"
+  mkdir -p "$artifact_dir"
+
+  started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  # Execute command
+  local result exit_code
+  result=$(daemon_exec_cmd "$cmd" "$cwd" "" "$timeout_s" 2>&1) && exit_code=$? || exit_code=$?
+
+  ended_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  # Save artifacts
+  echo "$result" > "$artifact_dir/stdout.txt"
+  echo "" > "$artifact_dir/stderr.txt"  # stderr captured in stdout via 2>&1
+
+  # Mark as handled
+  duckdb "$(msg_db)" "UPDATE messages SET handled_at = current_timestamp WHERE message_id = '$msg_id'"
+
+  # Emit result (but don't deliver in this function - let caller handle)
+  if [[ -n "$source" ]]; then
+    emit_cmd_result \
+      "${request_id:-$msg_id}" \
+      "$exit_code" \
+      "$artifact_dir/stdout.txt" \
+      "$artifact_dir/stderr.txt" \
+      "$started_at" \
+      "$ended_at" \
+      "$source" >/dev/null
+    # Note: actual delivery would be done by a separate sender loop or inline
+  fi
+
+  return 0
+}
+
 need_flagship() {
   [[ -f "$CONFIG_FILE" ]] || die "No flagship configured. Run: ohcommodore init"
 }
@@ -946,43 +1058,48 @@ _inbox_identity() {
 cmd__scheduler() {
   require_role commodore captain
 
+  # Initialize v2 queue system
+  queue_init_dirs
+  init_messages_db
+
   local poll_interval
   poll_interval=$(duckdb ~/.local/ship/data.duckdb -noheader -csv "SELECT value FROM config WHERE key = 'POLL_INTERVAL_SEC'" 2>/dev/null || echo "10")
   local identity
   identity=$(_inbox_identity)
   [[ -n "$identity" ]] || die "No IDENTITY in config"
 
-  log "Scheduler starting for $identity (poll: ${poll_interval}s)"
+  # Set up graceful shutdown
+  trap 'daemon_shutdown_handler' SIGTERM SIGINT
 
-  while true; do
-    local msg
-    msg=$(duckdb ~/.local/ship/data.duckdb -json "
-      UPDATE inbox SET status = 'running'
-      WHERE id = (SELECT id FROM inbox WHERE status = 'unread' AND recipient = '$identity' LIMIT 1)
-      RETURNING id, command
-    " 2>/dev/null)
+  log "v2 Scheduler starting for $identity (poll: ${poll_interval}s)"
 
-    if [[ -n "$msg" && "$msg" != "[]" ]]; then
-      local id cmd
-      id=$(echo "$msg" | jq -r '.[0].id')
-      cmd=$(echo "$msg" | jq -r '.[0].command')
+  # Recover any abandoned claims from previous crash
+  daemon_recover_claimed
 
-      local result exit_code
-      result=$(eval "$cmd" 2>&1) && exit_code=$? || exit_code=$?
+  while [[ $DAEMON_SHUTDOWN -eq 0 ]]; do
+    # Process all pending messages
+    while daemon_process_one "$identity" 2>/dev/null; do
+      [[ $DAEMON_SHUTDOWN -eq 0 ]] || break
+    done
 
-      local escaped_result escaped_id
-      escaped_result=$(sql_escape "$result")
-      escaped_id=$(sql_escape "$id")
-
-      if [[ $exit_code -eq 0 ]]; then
-        duckdb ~/.local/ship/data.duckdb "UPDATE inbox SET status='done', exit_code=$exit_code, result='$escaped_result' WHERE id='$escaped_id'"
-      else
-        duckdb ~/.local/ship/data.duckdb "UPDATE inbox SET status='error', exit_code=$exit_code, result='$escaped_result', error='Command failed with exit code $exit_code' WHERE id='$escaped_id'"
-      fi
+    # Send any pending outbound messages
+    local outbound_dir result_file dest_host dest_ssh
+    outbound_dir="$(q_root)/outbound"
+    if [[ -d "$outbound_dir" ]]; then
+      for result_file in "$outbound_dir"/*.json; do
+        [[ -f "$result_file" ]] || continue
+        dest_host=$(jq -r '.dest' "$result_file" | cut -d'@' -f2)
+        dest_ssh="exedev@$dest_host"
+        deliver_msg_file "$result_file" "$dest_ssh" 3 2>/dev/null || {
+          log "Warning: Failed to deliver result to $dest_host"
+        }
+      done
     fi
 
     sleep "$poll_interval"
   done
+
+  log "Scheduler shutting down gracefully"
 }
 
 show_help() {

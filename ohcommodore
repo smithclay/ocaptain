@@ -39,6 +39,13 @@ uuid_gen() {
   uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid
 }
 
+generate_ship_id() {
+  local repo_name="$1"
+  local suffix
+  suffix=$(openssl rand -hex 3)  # 6 chars
+  echo "${repo_name}-${suffix}"
+}
+
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
 }

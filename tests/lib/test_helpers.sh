@@ -18,6 +18,23 @@ TESTS_FAILED=0
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_ROOT="$(cd "$TEST_DIR/.." && pwd)"
 
+# Load .env from project root if present (existing env vars take precedence)
+if [[ -f "$PROJECT_ROOT/.env" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" != *=* ]] && continue
+        key="${line%%=*}"
+        [[ -z "$key" ]] && continue
+        [[ -n "${!key+x}" ]] && continue
+        value="${line#*=}"
+        value="${value%\"}"
+        value="${value#\"}"
+        value="${value%\'}"
+        value="${value#\'}"
+        export "$key=$value"
+    done < "$PROJECT_ROOT/.env"
+fi
+
 # Export paths for local deployment
 export INIT_PATH="$PROJECT_ROOT/cloudinit/init.sh"
 export DOTFILES_PATH="$PROJECT_ROOT/dotfiles"
@@ -135,6 +152,17 @@ check_required_env() {
   fi
 
   log_info "Environment checks passed"
+}
+
+# Pre-test cleanup - remove any lingering VMs from previous runs
+cleanup_lingering_vms() {
+  log_info "Cleaning up any lingering VMs..."
+  ssh exe.dev rm flagship-ohcommodore 2>/dev/null || true
+  # Clean up any ship VMs (they start with ship-)
+  for vm in $(ssh exe.dev ls 2>/dev/null | grep "^ship-" || true); do
+    ssh exe.dev rm "$vm" 2>/dev/null || true
+  done
+  rm -rf "$HOME/.ohcommodore" 2>/dev/null || true
 }
 
 # Cleanup function - scuttles the fleet

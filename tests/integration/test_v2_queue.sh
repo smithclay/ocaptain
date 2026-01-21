@@ -27,9 +27,8 @@ main() {
   # Check environment
   check_required_env
 
-  # Ensure clean state
-  log_info "Ensuring clean state..."
-  rm -rf "$HOME/.ohcommodore" 2>/dev/null || true
+  # Ensure clean state (remove lingering VMs from previous failed runs)
+  cleanup_lingering_vms
 
   # Register cleanup
   register_cleanup

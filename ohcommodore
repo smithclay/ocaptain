@@ -68,6 +68,26 @@ resolve_ship_prefix() {
   esac
 }
 
+lookup_ship_ssh_dest() {
+  local ship_id="$1"
+  local escaped_id
+  escaped_id=$(sql_escape "$ship_id")
+  local query="SELECT ssh_dest FROM ships WHERE id = '$escaped_id'"
+
+  local role
+  role=$(get_role)
+  local ssh_dest
+  if [[ "$role" == "commodore" ]]; then
+    ssh_dest=$(duckdb "$(msg_db)" -noheader -csv "$query" 2>/dev/null || echo "")
+  else
+    need_flagship
+    ssh_dest=$(flagship_ssh "duckdb ~/.ohcommodore/ns/${OHCOM_NS:-default}/data.duckdb -noheader -csv \"${query}\"" 2>/dev/null || echo "")
+  fi
+
+  [[ -n "$ssh_dest" ]] || return 1
+  echo "$ssh_dest"
+}
+
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
 }
@@ -758,8 +778,12 @@ _ship_create_impl() {
   init_env=$(upload_init_script "$ssh_dest")
   dotfiles_env=$(upload_dotfiles "$ssh_dest")
 
+  local flagship_hostname flagship_ssh_dest
+  flagship_hostname=$(hostname -f 2>/dev/null || hostname)
+  flagship_ssh_dest="exedev@$flagship_hostname"
+
   ssh "$ssh_dest" \
-    "GH_TOKEN=$(printf %q "$GH_TOKEN") $init_env $dotfiles_env SHIP_ID=$(printf %q "$ship_id") SHIP_SSH_PRIVKEY_B64=$(printf %q "$ship_privkey_b64") SHIP_SSH_PUBKEY_B64=$(printf %q "$ship_pubkey_b64") ~/.local/bin/ohcommodore _init_captain $(printf %q "$repo")"
+    "GH_TOKEN=$(printf %q "$GH_TOKEN") $init_env $dotfiles_env FLAGSHIP_SSH_DEST=$(printf %q "$flagship_ssh_dest") SHIP_ID=$(printf %q "$ship_id") SHIP_SSH_PRIVKEY_B64=$(printf %q "$ship_privkey_b64") SHIP_SSH_PUBKEY_B64=$(printf %q "$ship_pubkey_b64") ~/.local/bin/ohcommodore _init_captain $(printf %q "$repo")"
 
   # Update ship status to ready after successful init
   log "Updating ship status to ready..."
@@ -979,6 +1003,15 @@ cmd__init_captain() {
 {"role":"captain"}
 EOF
 
+  if [[ -n "${FLAGSHIP_SSH_DEST:-}" ]]; then
+    cat > "$CONFIG_FILE" <<EOF
+{
+  "flagship": "$FLAGSHIP_SSH_DEST",
+  "flagship_vm": "flagship-ohcommodore"
+}
+EOF
+  fi
+
   # Set up SSH keys if provided via env
   if [[ -n "${SHIP_SSH_PRIVKEY_B64:-}" && -n "${SHIP_SSH_PUBKEY_B64:-}" ]]; then
     log "Installing SSH keys from env..."
@@ -1071,13 +1104,9 @@ _inbox_send() {
   local dest_ssh
 
   if [[ "$role" == "captain" ]]; then
-    # Look up ship ssh_dest from ships table
-    local escaped_target
-    escaped_target=$(sql_escape "$target")
-    local ssh_dest
-    ssh_dest=$(duckdb "$(msg_db)" -noheader -csv "SELECT ssh_dest FROM ships WHERE id = '$escaped_target'" 2>/dev/null || echo "")
-    [[ -n "$ssh_dest" ]] || die "Ship '$target' not found in registry"
-    dest_ssh="$ssh_dest"
+    # Look up ship ssh_dest from central registry
+    dest_ssh=$(lookup_ship_ssh_dest "$target" || true)
+    [[ -n "$dest_ssh" ]] || die "Ship '$target' not found in registry"
   else
     # Commodore - target is hostname
     dest_ssh="exedev@$target"
@@ -1154,15 +1183,38 @@ cmd__scheduler() {
     done
 
     # Send any pending outbound messages
-    local outbound_dir result_file dest_host dest_ssh
+    local outbound_dir result_file dest dest_role dest_target dest_ssh
     outbound_dir="$(q_root)/outbound"
     if [[ -d "$outbound_dir" ]]; then
       for result_file in "$outbound_dir"/*.json; do
         [[ -f "$result_file" ]] || continue
-        dest_host=$(jq -r '.dest' "$result_file" | cut -d'@' -f2)
-        dest_ssh="exedev@$dest_host"
+        dest=$(jq -r '.dest' "$result_file")
+        if [[ "$dest" != *@* ]]; then
+          log "Warning: Invalid dest '$dest' in $result_file"
+          continue
+        fi
+        dest_role="${dest%%@*}"
+        dest_target="${dest#*@}"
+
+        case "$dest_role" in
+          captain)
+            dest_ssh=$(lookup_ship_ssh_dest "$dest_target" || true)
+            if [[ -z "$dest_ssh" ]]; then
+              log "Warning: Ship '$dest_target' not found in registry"
+              continue
+            fi
+            ;;
+          commodore)
+            dest_ssh="exedev@$dest_target"
+            ;;
+          *)
+            log "Warning: Unknown dest role '$dest_role' in $result_file"
+            continue
+            ;;
+        esac
+
         deliver_msg_file "$result_file" "$dest_ssh" 3 || {
-          log "Warning: Failed to deliver result to $dest_host (see errors above)"
+          log "Warning: Failed to deliver result to $dest_target (see errors above)"
         }
       done
     fi

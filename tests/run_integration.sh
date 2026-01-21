@@ -3,8 +3,8 @@
 #
 # Usage:
 #   ./tests/run_integration.sh           # Run all tests (loads .env automatically)
-#   ./tests/run_integration.sh fleet     # Run fleet lifecycle test
-#   ./tests/run_integration.sh queue     # Run v2 queue test
+#   ./tests/run_integration.sh fleet      # Run fleet lifecycle test
+#   ./tests/run_integration.sh messaging  # Run messaging test
 #
 # Environment (auto-loaded from .env if present):
 #   GH_TOKEN    - Required: GitHub PAT for repo access
@@ -48,9 +48,9 @@ Usage:
   $0 [test_name]
 
 Tests:
-  fleet    Run fleet lifecycle test (init, ship create/destroy, scuttle)
-  queue    Run v2 queue messaging test
-  all      Run all tests (default)
+  fleet      Run fleet lifecycle test (init, ship create/destroy, scuttle)
+  messaging  Run messaging test (flagship-to-ship and ship-to-ship)
+  all        Run all tests (default)
 
 Environment Variables:
   GH_TOKEN    Required: GitHub PAT for repo access
@@ -60,7 +60,7 @@ Environment Variables:
 Examples:
   GH_TOKEN=ghp_xxx $0
   GH_TOKEN=ghp_xxx $0 fleet
-  GH_TOKEN=ghp_xxx TEST_REPO=myorg/myrepo $0 queue
+  GH_TOKEN=ghp_xxx TEST_REPO=myorg/myrepo $0 messaging
   GH_TOKEN=ghp_xxx KEEP_FLEET=true $0 fleet
 EOF
 }
@@ -139,17 +139,17 @@ main() {
       check_env
       run_test "fleet_lifecycle"
       ;;
-    queue|v2_queue)
+    messaging)
       check_env
-      run_test "v2_queue"
+      run_test "messaging"
       ;;
     all)
       check_env
       local failed=0
 
       # Run tests sequentially (each creates its own fleet)
-      # For a full integration test, run queue test which includes fleet setup
-      run_test "v2_queue" || failed=1
+      # For a full integration test, run messaging test which includes fleet setup
+      run_test "messaging" || failed=1
 
       echo ""
       echo -e "${CYAN}========================================${NC}"

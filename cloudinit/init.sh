@@ -167,7 +167,7 @@ ssh-keyscan -H exe.dev >> ~/.ssh/known_hosts 2>/dev/null || true
 
 # Add SSH config to auto-accept exe.xyz hosts (all exe.dev VMs)
 log "Configuring SSH for exe.xyz hosts..."
-if ! grep -q '*.exe.xyz' ~/.ssh/config 2>/dev/null; then
+if ! grep -qF '*.exe.xyz' ~/.ssh/config 2>/dev/null; then
   cat >> ~/.ssh/config << 'SSHCONFIG'
 Host *.exe.xyz
   StrictHostKeyChecking accept-new

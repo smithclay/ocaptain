@@ -195,10 +195,12 @@ deliver_msg_file() {
   local last_err=""
   while [[ $attempt -le $max_retries ]]; do
     # Ensure remote directories exist
+    # shellcheck disable=SC2086  # ssh_opts needs word splitting
     if last_err=$(ssh $ssh_opts "$dest_ssh" "mkdir -p $remote_incoming $remote_inbound" 2>&1); then
       # SCP to .incoming (staging)
       if last_err=$(scp -q -o StrictHostKeyChecking=accept-new "$local_path" "${dest_ssh}:${remote_incoming}/${filename}" 2>&1); then
         # Atomic rename to publish
+        # shellcheck disable=SC2086  # ssh_opts needs word splitting
         if last_err=$(ssh $ssh_opts "$dest_ssh" "mv ${remote_incoming}/${filename} ${remote_inbound}/${filename}" 2>&1); then
           rm -f "$local_path"
           return 0
@@ -333,6 +335,7 @@ daemon_claim_one() {
 daemon_exec_cmd() {
   local cmd="$1"
   local cwd="$2"
+  # shellcheck disable=SC2034  # Reserved for future env var injection
   local env_json="$3"
   local timeout_s="${4:-1800}"
 
@@ -397,8 +400,9 @@ daemon_process_one() {
   local claimed_file
   claimed_file=$(daemon_claim_one) || return 1
 
-  # Ingest into database
+  # Ingest into database (ingest_err captures stderr for debugging)
   local ingest_err
+  # shellcheck disable=SC2034
   if ! ingest_err=$(ingest_queue_file "$claimed_file" 2>&1); then
     log "Failed to ingest claimed file: $claimed_file"
     return 1
@@ -515,6 +519,7 @@ wait_for_ssh() {
   local opts='-o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=5'
 
   for ((i=1; i<=retries; i++)); do
+    # shellcheck disable=SC2086  # opts needs word splitting
     if ssh $opts "$dest" 'true' >/dev/null 2>&1; then
       return 0
     fi
@@ -881,8 +886,6 @@ cmd_fleet_sink() {
   case "$(get_role)" in
     local)
       need_flagship
-      local flagship_dest
-      flagship_dest=$(jq -r '.flagship' "$CONFIG_FILE")
 
       # Sink ships on flagship (never pass --scuttle to flagship - we handle it locally)
       local args=""

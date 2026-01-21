@@ -759,7 +759,7 @@ _ship_create_impl() {
   dotfiles_env=$(upload_dotfiles "$ssh_dest")
 
   ssh "$ssh_dest" \
-    "GH_TOKEN=$(printf %q "$GH_TOKEN") $init_env $dotfiles_env SHIP_SSH_PRIVKEY_B64=$(printf %q "$ship_privkey_b64") SHIP_SSH_PUBKEY_B64=$(printf %q "$ship_pubkey_b64") ~/.local/bin/ohcommodore _init_captain $(printf %q "$repo")"
+    "GH_TOKEN=$(printf %q "$GH_TOKEN") $init_env $dotfiles_env SHIP_ID=$(printf %q "$ship_id") SHIP_SSH_PRIVKEY_B64=$(printf %q "$ship_privkey_b64") SHIP_SSH_PUBKEY_B64=$(printf %q "$ship_pubkey_b64") ~/.local/bin/ohcommodore _init_captain $(printf %q "$repo")"
 
   # Update ship status to ready after successful init
   log "Updating ship status to ready..."
@@ -995,11 +995,17 @@ EOF
     "SHIP_SSH_PRIVKEY_B64=${SHIP_SSH_PRIVKEY_B64:-}" \
     "SHIP_SSH_PUBKEY_B64=${SHIP_SSH_PUBKEY_B64:-}"
 
-  local ship_hostname
-  ship_hostname=$(hostname -f 2>/dev/null || hostname)
+  # Use SHIP_ID for identity (unique ship ID from fleet), with hostname fallback for backward compatibility
+  local ship_identity
+  if [[ -n "${SHIP_ID:-}" ]]; then
+    ship_identity="captain@$SHIP_ID"
+  else
+    # Fallback for ships initialized without SHIP_ID
+    ship_identity="captain@$(hostname -f 2>/dev/null || hostname)"
+  fi
 
   # Create common config and v2 queue state
-  init_common "captain@$ship_hostname"
+  init_common "$ship_identity"
 
   log "Captain initialized${repo:+ for $repo}."
 }

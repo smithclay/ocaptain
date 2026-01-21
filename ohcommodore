@@ -64,7 +64,7 @@ resolve_ship_prefix() {
   case "$count" in
     0) die "No ship matches '$prefix'" ;;
     1) echo "$matches" ;;
-    *) die "Multiple ships match '$prefix':\n$matches" ;;
+    *) die "Multiple ships match '$prefix': $(echo "$matches" | tr '\n' ' ')" ;;
   esac
 }
 

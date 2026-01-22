@@ -21,7 +21,7 @@ Flagship (exe.dev VM, long-running coordinator)
 Ships (exe.dev VMs, multiple per repo with unique IDs)
 ```
 
-**Key design principle**: Minimal external dependencies (bash, ssh, scp, duckdb). All communication happens over SSH.
+**Key design principle**: Minimal external dependencies (bash, ssh, opensmtpd, duckdb). All communication happens over SSH tunnels using email.
 
 ## File Structure
 
@@ -98,54 +98,30 @@ When a ship is created, `cloudinit/init.sh` runs and installs:
 - Rust toolchain via rustup
 - Oh My Zsh with zsh as default shell
 - Dotfiles via chezmoi
-- DuckDB CLI and v2 queue system (scheduler via `ohcommodore _scheduler`)
+- DuckDB CLI and email messaging (autossh tunnel to flagship SMTP)
 
-## v2 Queue System
+## Email Messaging System
 
-The v2 messaging system replaces remote DuckDB writes with file-based NDJSON queue transport.
+The messaging system uses email over SSH tunnels for inter-node communication.
 
-### Security Considerations
+### Architecture
 
-**Command Execution:** The inbox system executes commands from `cmd.exec` messages without sanitization. This is by design - the system is intended to run arbitrary commands from trusted sources. Security relies on:
-
-1. **SSH key authentication**: Only nodes with registered SSH keys can deliver messages to the queue
-2. **SCP delivery**: Messages arrive via SCP, which requires valid SSH credentials
-3. **Network isolation**: exe.dev VMs are not publicly accessible
-
-**Do not expose the inbox system to untrusted sources.** Any entity that can write to `~/.ohcommodore/ns/*/q/inbound/` can execute arbitrary commands.
-
-### Directory Layout (per namespace)
-
-```
-~/.ohcommodore/ns/<namespace>/
-├── q/
-│   ├── inbound/           # Incoming messages (visible)
-│   │   └── .incoming/     # Staging area for SCP
-│   ├── outbound/          # Outgoing messages pending delivery
-│   ├── dead/              # Failed messages + .reason files
-│   └── done/              # Successfully processed messages
-├── artifacts/             # Command output files
-│   └── <request_id>/
-│       ├── stdout.txt
-│       └── stderr.txt
-└── data.duckdb            # Messages table
-```
+- **Flagship**: Runs OpenSMTPD on localhost:25, delivers to per-identity Maildirs
+- **Ships**: SSH tunnel to flagship:25 via autossh, send mail via sendmail
+- **Storage**: Standard Maildir format (`~/Maildir/<identity>/{new,cur,tmp}`)
 
 ### Message Format
 
-Messages are JSON files with this envelope:
+Messages are standard RFC 5322 emails with custom `X-Ohcom-*` headers:
 
-```json
-{
-  "message_id": "uuid",
-  "created_at": "2026-01-20T19:12:03Z",
-  "source": "captain@ohcommodore-a1b2c3",
-  "dest": "commodore@flagship",
-  "topic": "cmd.exec",
-  "job_id": null,
-  "lease_token": null,
-  "payload": {}
-}
+```
+From: commodore@flagship
+To: ship-a1b2c3@flagship
+Subject: cmd.exec
+X-Ohcom-Topic: cmd.exec
+X-Ohcom-Request-ID: req-123
+
+cd ~/myrepo && cargo test
 ```
 
 ### Protocol Topics
@@ -155,9 +131,15 @@ Messages are JSON files with this envelope:
 | `cmd.exec` | → ship | Execute a command |
 | `cmd.result` | ← ship | Return execution result |
 
-### Environment Variables (v2)
+### Debugging
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OHCOM_NS` | `default` | Active namespace |
+```bash
+# See pending messages
+ls ~/Maildir/*/new/
 
+# Read message history
+mutt -f ~/Maildir/commodore/
+
+# Watch for new mail
+watch -n1 'ls ~/Maildir/*/new/'
+```

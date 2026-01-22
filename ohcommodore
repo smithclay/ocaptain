@@ -1409,76 +1409,115 @@ _inbox_identity() {
 cmd__scheduler() {
   require_role commodore captain
 
-  # Initialize v2 queue system
-  queue_init_dirs
-  init_messages_db
+  local my_identity maildir poll_interval
+  my_identity=$(_inbox_identity)
+  [[ -n "$my_identity" ]] || die "No identity configured"
+  maildir=$(maildir_for_identity "$my_identity")
+  ensure_maildir "$maildir"
 
-  local poll_interval
   poll_interval=$(duckdb "$(msg_db)" -noheader -csv "SELECT value FROM config WHERE key = 'POLL_INTERVAL_SEC'" 2>/dev/null || echo "10")
-  local identity
-  identity=$(_inbox_identity)
-  [[ -n "$identity" ]] || die "No IDENTITY in config"
 
-  # Set up graceful shutdown
-  trap 'daemon_shutdown_handler' SIGTERM SIGINT
+  trap 'log "Scheduler shutting down"; exit 0' SIGTERM SIGINT
 
-  log "v2 Scheduler starting for $identity (poll: ${poll_interval}s, timeout: ${CMD_TIMEOUT_S}s, queue: nq)"
+  log "Email scheduler starting for $my_identity (poll: ${poll_interval}s, maildir: $maildir)"
 
-  # Recover any abandoned claims from previous crash
-  daemon_recover_claimed
+  while true; do
+    # Process new mail
+    for msg in "$maildir/new/"*; do
+      [[ -f "$msg" ]] || continue
 
-  # Note: nq handles orphan recovery via flock - no action needed on restart
+      local filename topic
+      filename=$(basename "$msg")
 
-  while [[ $DAEMON_SHUTDOWN -eq 0 ]]; do
-    # Check nq jobs for completion
-    nq_check_jobs
+      # Claim by moving to cur/ (Maildir protocol)
+      mv "$msg" "$maildir/cur/${filename}:2,S"
+      msg="$maildir/cur/${filename}:2,S"
 
-    # Process all pending messages (submits to nq for sequential execution)
-    while daemon_process_one "$identity"; do
-      [[ $DAEMON_SHUTDOWN -eq 0 ]] || break
+      topic=$(email_get_header "$msg" "X-Ohcom-Topic")
+
+      case "$topic" in
+        cmd.exec)
+          _scheduler_handle_cmd_exec "$msg"
+          ;;
+        cmd.result)
+          _scheduler_handle_cmd_result "$msg"
+          ;;
+        *)
+          log "Unknown topic '$topic' in message, skipping"
+          ;;
+      esac
     done
-
-    # Send any pending outbound messages
-    local outbound_dir result_file dest dest_role dest_target dest_ssh
-    outbound_dir="$(q_root)/outbound"
-    if [[ -d "$outbound_dir" ]]; then
-      for result_file in "$outbound_dir"/*.json; do
-        [[ -f "$result_file" ]] || continue
-        dest=$(jq -r '.dest' "$result_file")
-        if [[ "$dest" != *@* ]]; then
-          log "Warning: Invalid dest '$dest' in $result_file"
-          continue
-        fi
-        dest_role="${dest%%@*}"
-        dest_target="${dest#*@}"
-
-        case "$dest_role" in
-          captain)
-            dest_ssh=$(lookup_ship_ssh_dest "$dest_target" || true)
-            if [[ -z "$dest_ssh" ]]; then
-              log "Warning: Ship '$dest_target' not found in registry"
-              continue
-            fi
-            ;;
-          commodore)
-            dest_ssh="exedev@$dest_target"
-            ;;
-          *)
-            log "Warning: Unknown dest role '$dest_role' in $result_file"
-            continue
-            ;;
-        esac
-
-        deliver_msg_file "$result_file" "$dest_ssh" 3 || {
-          log "Warning: Failed to deliver result to $dest_target (see errors above)"
-        }
-      done
-    fi
 
     sleep "$poll_interval"
   done
+}
 
-  log "Scheduler shutting down gracefully"
+_scheduler_handle_cmd_exec() {
+  local msg="$1"
+
+  local cmd request_id source started_at ended_at exit_code
+  cmd=$(email_get_body "$msg")
+  request_id=$(email_get_header "$msg" "X-Ohcom-Request-ID")
+  source=$(email_get_header "$msg" "From")
+
+  [[ -n "$cmd" ]] || { log "Empty command in message, skipping"; return; }
+
+  log "Executing: $cmd"
+  started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  # Create artifact directory for output
+  local artifact_dir
+  artifact_dir="$(artifacts_root)/${request_id:-$(uuid_gen)}"
+  mkdir -p "$artifact_dir"
+
+  # Execute command with timeout, capture output
+  set +e
+  timeout "$CMD_TIMEOUT_S" bash -c "$cmd" > "$artifact_dir/stdout.txt" 2> "$artifact_dir/stderr.txt"
+  exit_code=$?
+  set -e
+
+  ended_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  log "Command finished: exit=$exit_code"
+
+  # Send result back to source
+  if [[ -n "$source" ]]; then
+    local my_identity hostname body
+    my_identity=$(_inbox_identity)
+    hostname=$(hostname -f 2>/dev/null || hostname)
+
+    body=$(cat << RESULT_EOF
+Exit code: $exit_code
+Started: $started_at
+Ended: $ended_at
+
+--stdout--
+${hostname}:${artifact_dir}/stdout.txt
+
+--stderr--
+${hostname}:${artifact_dir}/stderr.txt
+RESULT_EOF
+)
+
+    send_reply "$msg" "$my_identity" "Re: cmd.exec" "$body" \
+      "X-Ohcom-Topic: cmd.result" \
+      "X-Ohcom-Request-ID: ${request_id:-unknown}" \
+      "X-Ohcom-Exit-Code: $exit_code"
+
+    log "Result sent to $source"
+  fi
+}
+
+_scheduler_handle_cmd_result() {
+  local msg="$1"
+
+  local request_id exit_code from
+  request_id=$(email_get_header "$msg" "X-Ohcom-Request-ID")
+  exit_code=$(email_get_header "$msg" "X-Ohcom-Exit-Code")
+  from=$(email_get_header "$msg" "From")
+
+  log "Received result: request=$request_id exit=$exit_code from=$from"
+  # Results are stored in Maildir for later inspection
 }
 
 show_help() {

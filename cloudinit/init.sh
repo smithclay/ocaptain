@@ -150,17 +150,34 @@ if [[ "${ROLE:-}" == "commodore" ]]; then
   fi
 
   log "Configuring OpenSMTPD for local Maildir delivery..."
+
+  # Create mail config directory
+  sudo mkdir -p /etc/mail
+
+  # Domain table - accept any domain (ships have dynamic domains)
+  echo "*" | sudo tee /etc/mail/domains > /dev/null
+
+  # Virtual users table - map any user to exedev
+  echo "@: exedev" | sudo tee /etc/mail/virtuals > /dev/null
+
   sudo tee /etc/smtpd.conf > /dev/null << 'SMTPD_CONF'
 # ohcommodore mail configuration
 # Listen only on localhost (ships tunnel in via SSH)
 listen on lo
 
-# Deliver all mail to user's Maildir tree, organized by recipient
-action "deliver" maildir "/home/exedev/Maildir/%{rcpt.user}"
+# Accept any domain (ship domains are dynamic)
+table domains file:/etc/mail/domains
 
-# Accept mail for "flagship" domain and localhost
-match from local for domain "flagship" action "deliver"
-match from local for local action "deliver"
+# Map any user at any domain to local exedev user
+table virtuals file:/etc/mail/virtuals
+
+# Deliver to Maildir organized by recipient domain
+# Identity format: role@ship-id (e.g., captain@ohcommodore-abc123)
+# Maildir path: ~/Maildir/ship-id/
+action "deliver" maildir "/home/exedev/Maildir/%{dest.domain}" virtual <virtuals>
+
+# Accept all mail from local for any domain
+match from local for domain <domains> action "deliver"
 SMTPD_CONF
 
   log "Creating base Maildir structure..."

@@ -1299,35 +1299,43 @@ cmd_inbox() {
 }
 
 _inbox_list() {
-  local status_filter=""
+  local status_filter="all"
   if [[ "${1:-}" == "--status" && -n "${2:-}" ]]; then
-    case "$2" in
-      unread|pending)
-        status_filter="WHERE handled_at IS NULL"
-        ;;
-      done|handled)
-        status_filter="WHERE handled_at IS NOT NULL"
-        ;;
-      *)
-        die "Invalid status '$2'. Use: unread, pending, done, handled"
-        ;;
-    esac
+    status_filter="$2"
   fi
 
-  [[ -f "$(msg_db)" ]] || die "Messages DB not initialized"
-  duckdb "$(msg_db)" -box "
-    SELECT
-      message_id as id,
-      CASE WHEN handled_at IS NULL THEN 'unread' ELSE 'done' END as status,
-      source as sender,
-      dest as recipient,
-      topic,
-      substr(payload_json, 1, 50) as payload_preview,
-      created_at
-    FROM messages
-    $status_filter
-    ORDER BY created_at DESC
-  "
+  local my_identity maildir
+  my_identity=$(_inbox_identity)
+  [[ -n "$my_identity" ]] || die "Cannot determine identity"
+  maildir=$(maildir_for_identity "$my_identity")
+
+  printf "%-8s %-40s %-25s %-15s %s\n" "STATUS" "ID" "FROM" "TOPIC" "DATE"
+  echo "-------- ---------------------------------------- ------------------------- --------------- --------------------"
+
+  local dir status
+  for dir in "$maildir/new" "$maildir/cur"; do
+    [[ -d "$dir" ]] || continue
+
+    if [[ "$dir" == */new ]]; then
+      status="unread"
+      [[ "$status_filter" == "done" || "$status_filter" == "handled" ]] && continue
+    else
+      status="done"
+      [[ "$status_filter" == "unread" || "$status_filter" == "pending" ]] && continue
+    fi
+
+    for msg in "$dir"/*; do
+      [[ -f "$msg" ]] || continue
+
+      local msg_id from topic date_hdr
+      msg_id=$(email_get_header "$msg" "Message-ID" | tr -d '<>' | cut -c1-38)
+      from=$(email_get_header "$msg" "From" | cut -c1-25)
+      topic=$(email_get_header "$msg" "X-Ohcom-Topic")
+      date_hdr=$(email_get_header "$msg" "Date" | cut -c1-20)
+
+      printf "%-8s %-40s %-25s %-15s %s\n" "$status" "$msg_id" "$from" "$topic" "$date_hdr"
+    done
+  done
 }
 
 _inbox_send() {

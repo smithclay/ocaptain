@@ -695,59 +695,15 @@ _remove_exe_vm() {
 }
 
 cmd_fleet_sink() {
-  local force=false scuttle=false direct=false
+  local force=false scuttle=false
   for arg in "$@"; do
     case "$arg" in
       --force) force=true ;;
       --scuttle) scuttle=true ;;
-      --direct) direct=true ;;
     esac
   done
 
-  # --direct mode: bypass flagship, remove VMs directly from exe.dev
-  if [[ "$direct" == true ]]; then
-    _fleet_sink_direct "$force" "$scuttle"
-    return
-  fi
-
-  case "$(get_role)" in
-    local)
-      need_flagship
-      local args=""
-      [[ "$force" == true ]] && args="--force"
-      flagship_ssh "~/.local/bin/ohcommodore fleet sink $args"
-
-      if [[ "$scuttle" == true ]]; then
-        _scuttle_flagship
-      fi
-      ;;
-    commodore)
-      _fleet_sink_impl "$force"
-      ;;
-    captain)
-      die "Fleet sink not available from ships"
-      ;;
-  esac
-}
-
-_scuttle_flagship() {
-  log "Scuttling flagship from local..."
-  local flagship_vm cluster_pubkey_b64
-  flagship_vm=$(jq -r '.flagship_vm' "$CONFIG_FILE")
-  cluster_pubkey_b64=$(jq -r '.cluster_pubkey_b64 // empty' "$CONFIG_FILE")
-
-  _remove_exe_vm "$flagship_vm" "Scuttling"
-
-  if [[ -n "$cluster_pubkey_b64" ]]; then
-    log "Removing fleet SSH key from exe.dev..."
-    local cluster_pubkey
-    cluster_pubkey=$(echo "$cluster_pubkey_b64" | base64_decode)
-    ssh -n exe.dev ssh-key remove "$cluster_pubkey" 2>/dev/null || log "Warning: Could not remove fleet SSH key"
-  fi
-
-  log "Removing local config..."
-  rm -rf "$CONFIG_DIR"
-  log "Fleet decommissioned."
+  _fleet_sink_direct "$force" "$scuttle"
 }
 
 _fleet_sink_direct() {
@@ -774,28 +730,6 @@ _fleet_sink_direct() {
 
   [[ -d "$CONFIG_DIR" ]] && { log "Removing local config..."; rm -rf "$CONFIG_DIR"; }
   log "Direct cleanup complete."
-}
-
-_fleet_sink_impl() {
-  local force="$1"
-  local ships_data
-  ships_data=$(duckdb "$(msg_db)" -noheader -csv "SELECT id, repo FROM ships" 2>/dev/null || echo "")
-
-  if [[ -z "$ships_data" ]]; then
-    echo "No ships to sink."
-  else
-    echo "WARNING: This will destroy all ships:"
-    echo "$ships_data" | while IFS=',' read -r id repo; do echo "  - $id ($repo)"; done
-
-    _confirm_sink "$force"
-
-    echo "$ships_data" | while IFS=',' read -r id _repo; do
-      log "Sinking $id..."
-      _ship_destroy_impl "$id" >/dev/null
-    done
-    log "Fleet sunk."
-  fi
-  echo "Flagship still running."
 }
 
 init_common() {
@@ -1196,9 +1130,8 @@ ohcommodore - lightweight multi-agent control plane
 USAGE:
   ohcommodore init                         Bootstrap flagship VM
   ohcommodore fleet status                 Show fleet status
-  ohcommodore fleet sink [--force] [--scuttle] [--direct]  Destroy ships
+  ohcommodore fleet sink [--force] [--scuttle]  Destroy ships
     --scuttle  Also destroy flagship
-    --direct   Bypass flagship, remove VMs directly from exe.dev (for orphan cleanup)
   ohcommodore ship create <owner/repo|name> Create ship (repo or empty)
   ohcommodore ship destroy <name>          Destroy a ship
   ohcommodore ship ssh <name>              SSH into a ship

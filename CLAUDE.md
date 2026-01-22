@@ -44,8 +44,8 @@ GH_TOKEN=... ./ohcommodore init
 
 # Fleet management
 ./ohcommodore fleet status
-./ohcommodore fleet sink              # Destroy all ships (prompts for confirmation)
-./ohcommodore fleet sink --scuttle    # Destroy ships + flagship
+./ohcommodore fleet sink              # Destroy all ships (direct cleanup; prompts for confirmation)
+./ohcommodore fleet sink --scuttle    # Destroy ships + flagship (direct cleanup)
 
 # Ship management (requires GH_TOKEN env var for create)
 # Ships get unique IDs like ohcommodore-a1b2c3 (Docker-like model)

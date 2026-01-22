@@ -46,7 +46,7 @@ main() {
     return 1
   fi
 
-  assert_contains "Flagship created" "$init_output" "Flagship created"
+  assert_contains "Flagship created" "$init_output" "Done! Cluster"
   assert "Config file exists" "[[ -f '$HOME/.ohcommodore/config.json' ]]"
 
   local flagship_dest
@@ -146,8 +146,8 @@ main() {
 
   status_output=$("$PROJECT_ROOT/ohcommodore" fleet status 2>&1)
 
-  # Ship should no longer appear
-  assert "Ship removed from fleet" "! echo '$status_output' | grep -q '$ship_name'"
+  # Ship should no longer appear in the ships list (check for ship ID pattern, not just repo name)
+  assert "Ship removed from fleet" "! echo '$status_output' | grep -qE '^  $ship_name-'"
 
   # ============================================
   # Test 9: Scuttle (cleanup happens via trap)

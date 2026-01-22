@@ -329,10 +329,12 @@ ingest_queue_file() {
 }
 
 # Daemon support functions (v2 queue system)
+# shellcheck disable=SC2034  # DAEMON_SHUTDOWN is set by signal handler for future use
 DAEMON_SHUTDOWN=0
 
 daemon_shutdown_handler() {
   log "Shutdown signal received, finishing current work..."
+  # shellcheck disable=SC2034  # Set for daemon loop to check
   DAEMON_SHUTDOWN=1
 }
 
@@ -1403,7 +1405,18 @@ _inbox_read() {
 }
 
 _inbox_identity() {
-  duckdb "$(msg_db)" -noheader -csv "SELECT value FROM config WHERE key = 'IDENTITY'" 2>/dev/null
+  local identity
+  identity=$(duckdb "$(msg_db)" -noheader -csv "SELECT value FROM config WHERE key = 'IDENTITY'" 2>/dev/null)
+
+  # Ensure we have a valid email-style identity
+  if [[ -z "$identity" ]]; then
+    local role hostname
+    role=$(get_role)
+    hostname=$(hostname -f 2>/dev/null || hostname)
+    identity="${role}@${hostname}"
+  fi
+
+  echo "$identity"
 }
 
 cmd__scheduler() {

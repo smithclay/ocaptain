@@ -170,17 +170,6 @@ SMTPD_CONF
   sudo systemctl enable --now opensmtpd
 fi
 
-log "Installing nq (job queue utility)..."
-if ! need_cmd nq; then
-  git clone --depth 1 https://github.com/leahneukirchen/nq /tmp/nq || die "Failed to clone nq repository"
-  cd /tmp/nq || die "Failed to cd to nq directory"
-  make || die "Failed to build nq"
-  sudo make install PREFIX=/usr/local || die "Failed to install nq"
-  rm -rf /tmp/nq
-else
-  log "nq already installed — skipping"
-fi
-
 log "Setting up SSH keys..."
 mkdir -p ~/.ssh
 chmod 700 ~/.ssh

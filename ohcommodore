@@ -448,16 +448,16 @@ cmd_init() {
   cluster_privkey_b64=$(echo "$flagship_privkey" | base64 | tr -d '\n')
   cluster_pubkey_b64=$(echo "$flagship_pubkey" | base64 | tr -d '\n')
 
-  cat > "$CONFIG_FILE" <<EOF
-{
-  "flagship": "$ssh_dest",
-  "flagship_vm": "$flagship_vm",
-  "cluster_id": "$cluster_id",
-  "cluster_privkey_b64": "$cluster_privkey_b64",
-  "cluster_pubkey_b64": "$cluster_pubkey_b64",
-  "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-EOF
+  jq -n \
+    --arg flagship "$ssh_dest" \
+    --arg flagship_vm "$flagship_vm" \
+    --arg cluster_id "$cluster_id" \
+    --arg privkey "$cluster_privkey_b64" \
+    --arg pubkey "$cluster_pubkey_b64" \
+    --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{flagship: $flagship, flagship_vm: $flagship_vm, cluster_id: $cluster_id,
+      cluster_privkey_b64: $privkey, cluster_pubkey_b64: $pubkey, created_at: $created}' \
+    > "$CONFIG_FILE"
 
   log "Done! Cluster '$cluster_id' ready at: $ssh_dest"
   log "Run 'ohcommodore fleet status' to verify."
@@ -492,10 +492,12 @@ _fleet_status_impl() {
     ship_count=$(echo "$ships_data" | wc -l | tr -d ' ')
 
     echo "SHIPS ($ship_count):"
-    printf "  %-25s %-20s %-35s %s\n" "SHIP" "REPO" "SSH_DEST" "STATUS"
-    echo "$ships_data" | while IFS=',' read -r id repo ssh_dest status; do
-      printf "  %-25s %-20s %-35s %s\n" "$id" "$repo" "$ssh_dest" "$status"
-    done
+    {
+      echo "SHIP	REPO	SSH_DEST	STATUS"
+      echo "$ships_data" | while IFS=',' read -r id repo ssh_dest status; do
+        echo "$id	$repo	$ssh_dest	$status"
+      done
+    } | column -t -s $'\t' | sed 's/^/  /'
   fi
 }
 
@@ -758,9 +760,7 @@ init_common() {
 cmd__init_commodore() {
   log "Initializing commodore identity..."
   mkdir -p "$CONFIG_DIR"
-  cat > "$CONFIG_DIR/identity.json" <<'EOF'
-{"role":"commodore"}
-EOF
+  jq -n '{role: "commodore"}' > "$CONFIG_DIR/identity.json"
 
   run_init_script commodore
 
@@ -790,16 +790,10 @@ cmd__init_captain() {
 
   log "Initializing captain identity..."
   mkdir -p "$CONFIG_DIR"
-  cat > "$CONFIG_DIR/identity.json" <<EOF
-{"role":"captain"}
-EOF
+  jq -n '{role: "captain"}' > "$CONFIG_DIR/identity.json"
 
   if [[ -n "${FLAGSHIP_SSH_DEST:-}" ]]; then
-    cat > "$CONFIG_FILE" <<EOF
-{
-  "flagship": "$FLAGSHIP_SSH_DEST"
-}
-EOF
+    jq -n --arg flagship "$FLAGSHIP_SSH_DEST" '{flagship: $flagship}' > "$CONFIG_FILE"
   fi
 
   run_init_script captain \
@@ -871,33 +865,33 @@ _inbox_list() {
   [[ -n "$my_identity" ]] || die "Cannot determine identity"
   maildir=$(maildir_for_identity "$my_identity")
 
-  printf "%-8s %-40s %-25s %-15s %s\n" "STATUS" "ID" "FROM" "TOPIC" "DATE"
-  echo "-------- ---------------------------------------- ------------------------- --------------- --------------------"
+  {
+    echo "STATUS	ID	FROM	TOPIC	DATE"
+    local dir status
+    for dir in "$maildir/new" "$maildir/cur"; do
+      [[ -d "$dir" ]] || continue
 
-  local dir status
-  for dir in "$maildir/new" "$maildir/cur"; do
-    [[ -d "$dir" ]] || continue
+      if [[ "$dir" == */new ]]; then
+        status="unread"
+        [[ "$status_filter" == "done" || "$status_filter" == "handled" ]] && continue
+      else
+        status="done"
+        [[ "$status_filter" == "unread" || "$status_filter" == "pending" ]] && continue
+      fi
 
-    if [[ "$dir" == */new ]]; then
-      status="unread"
-      [[ "$status_filter" == "done" || "$status_filter" == "handled" ]] && continue
-    else
-      status="done"
-      [[ "$status_filter" == "unread" || "$status_filter" == "pending" ]] && continue
-    fi
+      for msg in "$dir"/*; do
+        [[ -f "$msg" ]] || continue
 
-    for msg in "$dir"/*; do
-      [[ -f "$msg" ]] || continue
+        local msg_id from topic date_hdr
+        msg_id=$(email_get_header "$msg" "Message-ID" | tr -d '<>' | cut -c1-38)
+        from=$(email_get_header "$msg" "From" | cut -c1-25)
+        topic=$(email_get_header "$msg" "X-Ohcom-Topic")
+        date_hdr=$(email_get_header "$msg" "Date" | cut -c1-20)
 
-      local msg_id from topic date_hdr
-      msg_id=$(email_get_header "$msg" "Message-ID" | tr -d '<>' | cut -c1-38)
-      from=$(email_get_header "$msg" "From" | cut -c1-25)
-      topic=$(email_get_header "$msg" "X-Ohcom-Topic")
-      date_hdr=$(email_get_header "$msg" "Date" | cut -c1-20)
-
-      printf "%-8s %-40s %-25s %-15s %s\n" "$status" "$msg_id" "$from" "$topic" "$date_hdr"
+        echo "$status	$msg_id	$from	$topic	$date_hdr"
+      done
     done
-  done
+  } | column -t -s $'\t'
 }
 
 _inbox_send() {

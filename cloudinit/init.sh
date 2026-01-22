@@ -138,6 +138,38 @@ else
   log "DuckDB already installed — skipping"
 fi
 
+# ──────────────────────────────────────────────────────────
+# Email infrastructure (commodore only)
+# ──────────────────────────────────────────────────────────
+
+if [[ "${ROLE:-}" == "commodore" ]]; then
+  log "Installing OpenSMTPD..."
+  if ! need_cmd smtpd; then
+    sudo apt-get update -qq
+    sudo apt-get install -y opensmtpd
+  fi
+
+  log "Configuring OpenSMTPD for local Maildir delivery..."
+  sudo tee /etc/smtpd.conf > /dev/null << 'SMTPD_CONF'
+# ohcommodore mail configuration
+# Listen only on localhost (ships tunnel in via SSH)
+listen on lo
+
+# Deliver all mail to user's Maildir tree, organized by recipient
+action "deliver" maildir "/home/exedev/Maildir/%{rcpt.user}"
+
+# Accept mail for "flagship" domain and localhost
+match from local for domain "flagship" action "deliver"
+match from local for local action "deliver"
+SMTPD_CONF
+
+  log "Creating base Maildir structure..."
+  mkdir -p ~/Maildir/commodore/{new,cur,tmp}
+
+  log "Starting OpenSMTPD..."
+  sudo systemctl enable --now opensmtpd
+fi
+
 log "Installing nq (job queue utility)..."
 if ! need_cmd nq; then
   git clone --depth 1 https://github.com/leahneukirchen/nq /tmp/nq || die "Failed to clone nq repository"

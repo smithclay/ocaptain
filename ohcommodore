@@ -496,9 +496,7 @@ daemon_ingest_one() {
   local claimed_file
   claimed_file=$(daemon_claim_one) || return 1
 
-  local ingest_err
-  # shellcheck disable=SC2034
-  if ! ingest_err=$(ingest_queue_file "$claimed_file" 2>&1); then
+  if ! ingest_queue_file "$claimed_file" 2>&1; then
     log "Failed to ingest claimed file: $claimed_file"
     return 1
   fi
@@ -563,7 +561,7 @@ require_role() {
 
 wait_for_ssh() {
   local dest="$1"
-  local retries="${2:-30}"
+  local retries="${2:-60}"
   local delay="${3:-2}"
   local opts='-o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=5'
 
@@ -636,8 +634,13 @@ cmd_init() {
   [[ -n "${GH_TOKEN:-}" ]] || die "GH_TOKEN env var required for flagship init"
   [[ -f "$CONFIG_FILE" ]] && die "Already initialized. Config: $CONFIG_FILE"
 
-  log "Creating flagship VM..."
-  create_json=$(ssh exe.dev new --json --name="flagship-ohcommodore" --no-email) \
+  # Generate unique cluster ID (like ship IDs)
+  local cluster_id
+  cluster_id="ohcommodore-$(openssl rand -hex 3)"
+  local flagship_vm="flagship-${cluster_id}"
+
+  log "Creating flagship VM ($flagship_vm)..."
+  create_json=$(ssh exe.dev new --json --name="$flagship_vm" --no-email) \
     || die "Failed to create flagship VM"
 
   ssh_dest=$(echo "$create_json" | jq -r '.ssh_dest // empty')
@@ -652,9 +655,16 @@ cmd_init() {
   log "Deploying ohcommodore to flagship..."
   deploy_ohcommodore "$ssh_dest"
 
-  log "Setting up flagship SSH key..."
-  flagship_pubkey=$(ssh "$ssh_dest" 'ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 -q 2>/dev/null || true; cat ~/.ssh/id_ed25519.pub')
-  ssh exe.dev ssh-key add "$flagship_pubkey" || log "Warning: Could not add flagship SSH key (may already exist)"
+  log "Setting up cluster SSH key..."
+  # Generate key on flagship - this key will be shared with all ships
+  ssh "$ssh_dest" 'ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 -q 2>/dev/null || true'
+  local flagship_pubkey flagship_privkey
+  flagship_pubkey=$(ssh "$ssh_dest" 'cat ~/.ssh/id_ed25519.pub')
+  flagship_privkey=$(ssh "$ssh_dest" 'cat ~/.ssh/id_ed25519')
+
+  # Register the cluster key with exe.dev (comment in key includes cluster ID via hostname)
+  ssh exe.dev ssh-key add "$flagship_pubkey" \
+    || log "Warning: Could not add cluster SSH key (may already exist)"
   ssh "$ssh_dest" 'ssh -o StrictHostKeyChecking=accept-new exe.dev whoami >/dev/null 2>&1' || true
 
   local init_env dotfiles_env
@@ -667,15 +677,23 @@ cmd_init() {
 
   log "Saving local config..."
   mkdir -p "$CONFIG_DIR"
+  # Store cluster key for ship creation (base64 encoded)
+  local cluster_privkey_b64 cluster_pubkey_b64
+  cluster_privkey_b64=$(echo "$flagship_privkey" | base64 | tr -d '\n')
+  cluster_pubkey_b64=$(echo "$flagship_pubkey" | base64 | tr -d '\n')
+
   cat > "$CONFIG_FILE" <<EOF
 {
   "flagship": "$ssh_dest",
-  "flagship_vm": "flagship-ohcommodore",
+  "flagship_vm": "$flagship_vm",
+  "cluster_id": "$cluster_id",
+  "cluster_privkey_b64": "$cluster_privkey_b64",
+  "cluster_pubkey_b64": "$cluster_pubkey_b64",
   "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 EOF
 
-  log "Done! Flagship ready at: $ssh_dest"
+  log "Done! Cluster '$cluster_id' ready at: $ssh_dest"
   log "Run 'ohcommodore fleet status' to verify."
 }
 
@@ -760,21 +778,11 @@ _ship_create_impl() {
   local ship_id
   ship_id=$(generate_ship_id "$name")
 
-  log "Generating SSH key for ship..."
-  local tmpdir
-  tmpdir=$(mktemp -d)
-  trap 'rm -rf "${tmpdir:-}"' EXIT
-  ssh-keygen -t ed25519 -N "" -f "$tmpdir/ship_key" -q
-  local ship_privkey ship_pubkey
-  ship_privkey=$(cat "$tmpdir/ship_key")
-  ship_pubkey=$(cat "$tmpdir/ship_key.pub")
-
-  log "Registering ship SSH key with exe.dev..."
-  ssh exe.dev ssh-key add "$ship_pubkey" || log "Warning: Could not add ship SSH key (may already exist)"
-
-  local ship_privkey_b64 ship_pubkey_b64
-  ship_privkey_b64=$(echo "$ship_privkey" | base64 -w0)
-  ship_pubkey_b64=$(echo "$ship_pubkey" | base64 -w0)
+  # Use cluster SSH key (all ships share the same key as flagship)
+  log "Using cluster SSH key..."
+  local cluster_privkey_b64 cluster_pubkey_b64
+  cluster_privkey_b64=$(base64 < ~/.ssh/id_ed25519 | tr -d '\n')
+  cluster_pubkey_b64=$(base64 < ~/.ssh/id_ed25519.pub | tr -d '\n')
 
   log "Creating ship VM..."
   local create_json
@@ -783,8 +791,8 @@ _ship_create_impl() {
     --no-email \
     --env GH_TOKEN="$GH_TOKEN" \
     --env TARGET_REPO="$repo" \
-    --env SHIP_SSH_PRIVKEY_B64="$ship_privkey_b64" \
-    --env SHIP_SSH_PUBKEY_B64="$ship_pubkey_b64") || true
+    --env SHIP_SSH_PRIVKEY_B64="$cluster_privkey_b64" \
+    --env SHIP_SSH_PUBKEY_B64="$cluster_pubkey_b64") || true
 
   local error_msg
   error_msg=$(echo "$create_json" | jq -r '.error // empty')
@@ -837,7 +845,7 @@ _ship_create_impl() {
   flagship_ssh_dest="exedev@$flagship_hostname"
 
   ssh "$ssh_dest" \
-    "GH_TOKEN=$(printf %q "$GH_TOKEN") $init_env $dotfiles_env FLAGSHIP_SSH_DEST=$(printf %q "$flagship_ssh_dest") SHIP_ID=$(printf %q "$ship_id") SHIP_SSH_PRIVKEY_B64=$(printf %q "$ship_privkey_b64") SHIP_SSH_PUBKEY_B64=$(printf %q "$ship_pubkey_b64") ~/.local/bin/ohcommodore _init_captain $(printf %q "$repo")"
+    "GH_TOKEN=$(printf %q "$GH_TOKEN") $init_env $dotfiles_env FLAGSHIP_SSH_DEST=$(printf %q "$flagship_ssh_dest") SHIP_ID=$(printf %q "$ship_id") SHIP_SSH_PRIVKEY_B64=$(printf %q "$cluster_privkey_b64") SHIP_SSH_PUBKEY_B64=$(printf %q "$cluster_pubkey_b64") ~/.local/bin/ohcommodore _init_captain $(printf %q "$repo")"
 
   # Update ship status to ready after successful init
   log "Updating ship status to ready..."
@@ -944,8 +952,21 @@ cmd_fleet_sink() {
       if [[ "$scuttle" == true ]]; then
         # Delete flagship VM directly from local (flagship can't delete itself)
         log "Scuttling flagship from local..."
-        log "Removing VM flagship-ohcommodore..."
-        timeout 30 ssh exe.dev rm "flagship-ohcommodore" || log "Warning: VM removal timed out or failed"
+        local flagship_vm cluster_pubkey_b64
+        flagship_vm=$(jq -r '.flagship_vm' "$CONFIG_FILE")
+        cluster_pubkey_b64=$(jq -r '.cluster_pubkey_b64 // empty' "$CONFIG_FILE")
+
+        log "Removing VM $flagship_vm..."
+        timeout 30 ssh exe.dev rm "$flagship_vm" || log "Warning: VM removal timed out or failed"
+
+        # Remove cluster SSH key from exe.dev
+        if [[ -n "$cluster_pubkey_b64" ]]; then
+          log "Removing cluster SSH key from exe.dev..."
+          local cluster_pubkey
+          cluster_pubkey=$(echo "$cluster_pubkey_b64" | base64 -d)
+          ssh -n exe.dev ssh-key remove "$cluster_pubkey" 2>/dev/null || log "Warning: Could not remove cluster SSH key"
+        fi
+
         log "Fleet decommissioned."
         log "Removing local config..."
         rm -rf "$CONFIG_DIR"
@@ -1058,8 +1079,7 @@ EOF
   if [[ -n "${FLAGSHIP_SSH_DEST:-}" ]]; then
     cat > "$CONFIG_FILE" <<EOF
 {
-  "flagship": "$FLAGSHIP_SSH_DEST",
-  "flagship_vm": "flagship-ohcommodore"
+  "flagship": "$FLAGSHIP_SSH_DEST"
 }
 EOF
   fi

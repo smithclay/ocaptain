@@ -1,0 +1,163 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+ohcommodore is a lightweight multi-coding agent control plane built on exe.dev VMs. It manages a fleet of pre-configured VMs with source code checked out, using a nautical-themed architecture.
+
+## Architecture
+
+```
+Commodore (local CLI: ./ohcommodore)
+    │
+    │ SSH
+    ▼
+Flagship (exe.dev VM, long-running coordinator)
+    │ Stores fleet in DuckDB, manages ships via SSH
+    │
+    │ SSH
+    ▼
+Ships (exe.dev VMs, multiple per repo with unique IDs)
+```
+
+**Key design principle**: Minimal external dependencies (bash, ssh, scp, duckdb). All communication happens over SSH.
+
+## File Structure
+
+| Path | Purpose |
+|------|---------|
+| `ohcommodore` | Main CLI script (runs everywhere: local, flagship, ships) |
+| `cloudinit/init.sh` | OS-level initialization (apt, tools, zsh, etc.) |
+
+**Identity detection:** `~/.ohcommodore/identity.json` with `{"role":"local|commodore|captain"}`
+
+**Local config:** `~/.ohcommodore/config.json` stores flagship SSH destination (local only)
+
+**VM state:** `~/.ohcommodore/ns/<namespace>/data.duckdb` stores fleet registry (flagship), local config, and messages.
+
+## Commands
+
+```bash
+# Bootstrap flagship VM (requires GH_TOKEN)
+GH_TOKEN=... ./ohcommodore init
+
+# Fleet management
+./ohcommodore fleet status
+./ohcommodore fleet sink              # Destroy all ships (prompts for confirmation)
+./ohcommodore fleet sink --scuttle    # Destroy ships + flagship
+
+# Ship management (requires GH_TOKEN env var for create)
+# Ships get unique IDs like ohcommodore-a1b2c3 (Docker-like model)
+GH_TOKEN=... ./ohcommodore ship create owner/repo  # Creates ohcommodore-a1b2c3
+GH_TOKEN=... ./ohcommodore ship create owner/repo  # Creates ohcommodore-x7y8z9 (new instance)
+./ohcommodore ship ssh ohcommodore-a1              # Prefix matching (must be unique)
+./ohcommodore ship destroy ohcommodore-a1          # Prefix matching
+```
+
+### Inbox Commands
+
+Run these commands on a ship (via `ohcommodore ship ssh <ship-id-prefix>`):
+
+```bash
+# List inbox messages
+ohcommodore inbox list
+ohcommodore inbox list --status done
+
+# Send a command to another ship (use full ship ID)
+ohcommodore inbox send captain@other-repo-d4e5f6 "cargo test"
+
+# Send a command to commodore
+ohcommodore inbox send commodore@flagship-host "echo 'Report from ship'"
+
+# Get this ship's identity
+ohcommodore inbox identity
+
+# Manual message management
+ohcommodore inbox read <id>        # Mark handled and return message JSON
+```
+
+## Environment Variables
+
+| Variable | Where Used | Description |
+|----------|------------|-------------|
+| `GH_TOKEN` | init, ship create, cloudinit | GitHub PAT for repo access (required) |
+| `TARGET_REPO` | cloudinit | Repository to clone (e.g., `owner/repo`) |
+| `INIT_PATH` | init, ship create | Local path to init script (scp'd to VMs, overrides `INIT_URL`) |
+| `INIT_URL` | init, ship create | Override the init script URL |
+| `DOTFILES_PATH` | init, ship create | Local dotfiles directory (scp'd to VMs, highest priority) |
+| `DOTFILES_URL` | init, ship create, cloudinit | Dotfiles repo URL (default: `https://github.com/smithclay/ohcommodore`) |
+| `ROLE` | cloudinit | Identity role: `captain` (ships) or `commodore` (flagship) |
+
+## Ship Initialization
+
+When a ship is created, `cloudinit/init.sh` runs and installs:
+- GitHub CLI with authenticated token
+- Target repository cloned to `~/<repo-name>`
+- Zellij terminal multiplexer
+- Rust toolchain via rustup
+- Oh My Zsh with zsh as default shell
+- Dotfiles via chezmoi
+- DuckDB CLI and v2 queue system (scheduler via `ohcommodore _scheduler`)
+
+## v2 Queue System
+
+The v2 messaging system replaces remote DuckDB writes with file-based NDJSON queue transport.
+
+### Security Considerations
+
+**Command Execution:** The inbox system executes commands from `cmd.exec` messages without sanitization. This is by design - the system is intended to run arbitrary commands from trusted sources. Security relies on:
+
+1. **SSH key authentication**: Only nodes with registered SSH keys can deliver messages to the queue
+2. **SCP delivery**: Messages arrive via SCP, which requires valid SSH credentials
+3. **Network isolation**: exe.dev VMs are not publicly accessible
+
+**Do not expose the inbox system to untrusted sources.** Any entity that can write to `~/.ohcommodore/ns/*/q/inbound/` can execute arbitrary commands.
+
+### Directory Layout (per namespace)
+
+```
+~/.ohcommodore/ns/<namespace>/
+├── q/
+│   ├── inbound/           # Incoming messages (visible)
+│   │   └── .incoming/     # Staging area for SCP
+│   ├── outbound/          # Outgoing messages pending delivery
+│   ├── dead/              # Failed messages + .reason files
+│   └── done/              # Successfully processed messages
+├── artifacts/             # Command output files
+│   └── <request_id>/
+│       ├── stdout.txt
+│       └── stderr.txt
+└── data.duckdb            # Messages table
+```
+
+### Message Format
+
+Messages are JSON files with this envelope:
+
+```json
+{
+  "message_id": "uuid",
+  "created_at": "2026-01-20T19:12:03Z",
+  "source": "captain@ohcommodore-a1b2c3",
+  "dest": "commodore@flagship",
+  "topic": "cmd.exec",
+  "job_id": null,
+  "lease_token": null,
+  "payload": {}
+}
+```
+
+### Protocol Topics
+
+| Topic | Direction | Purpose |
+|-------|-----------|---------|
+| `cmd.exec` | → ship | Execute a command |
+| `cmd.result` | ← ship | Return execution result |
+
+### Environment Variables (v2)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OHCOM_NS` | `default` | Active namespace |
+

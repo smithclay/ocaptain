@@ -922,77 +922,66 @@ cmd_inbox() {
 }
 
 _inbox_list() {
-  local status_filter="all"
-  if [[ "${1:-}" == "--status" && -n "${2:-}" ]]; then
-    status_filter="$2"
-  fi
+  local status_filter="all" for_identity=""
 
-  # Validate status_filter to prevent injection
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --status) status_filter="${2:-}"; shift 2 ;;
+      --for-identity) for_identity="${2:-}"; shift 2 ;;  # Internal: used for delegation
+      *) shift ;;
+    esac
+  done
+
+  # Validate status_filter
   case "$status_filter" in
     all|done|handled|unread|pending) ;;
     *) die "Invalid status filter: $status_filter" ;;
   esac
 
+  # Ships delegate to flagship (where Maildir lives)
+  if maildir_is_remote; then
+    local my_identity args=""
+    my_identity=$(_inbox_identity)
+    [[ "$status_filter" != "all" ]] && args="--status $(shell_quote "$status_filter")"
+    args="$args --for-identity $(shell_quote "$my_identity")"
+    flagship_ssh "~/.local/bin/ohcommodore inbox list $args"
+    return
+  fi
+
+  # Local: use for_identity if provided (delegation), otherwise own identity
   local my_identity maildir
-  my_identity=$(_inbox_identity)
+  my_identity="${for_identity:-$(_inbox_identity)}"
   [[ -n "$my_identity" ]] || die "Cannot determine identity"
   maildir=$(maildir_for_identity "$my_identity")
 
   printf "%-8s %-40s %-25s %-15s %s\n" "STATUS" "ID" "FROM" "TOPIC" "DATE"
   echo "-------- ---------------------------------------- ------------------------- --------------- --------------------"
 
-  if maildir_is_remote; then
-    local q_maildir
-    q_maildir=$(shell_quote "$maildir")
+  local dir status
+  for dir in "$maildir/new" "$maildir/cur"; do
+    [[ -d "$dir" ]] || continue
 
-    # Remote Maildir listing - parse on flagship side
-    flagship_ssh "
-      for dir in $q_maildir/new $q_maildir/cur; do
-        [[ -d \"\$dir\" ]] || continue
-        if [[ \"\$dir\" == */new ]]; then
-          status='unread'
-          [[ '$status_filter' == 'done' || '$status_filter' == 'handled' ]] && continue
-        else
-          status='done'
-          [[ '$status_filter' == 'unread' || '$status_filter' == 'pending' ]] && continue
-        fi
-        for msg in \"\$dir\"/*; do
-          [[ -f \"\$msg\" ]] || continue
-          msg_id=\$(grep -i '^Message-ID:' \"\$msg\" | head -1 | sed 's/^[^:]*: *//' | tr -d '<>' | cut -c1-38)
-          from=\$(grep -i '^From:' \"\$msg\" | head -1 | sed 's/^[^:]*: *//' | cut -c1-25)
-          topic=\$(grep -i '^X-Ohcom-Topic:' \"\$msg\" | head -1 | sed 's/^[^:]*: *//')
-          date_hdr=\$(grep -i '^Date:' \"\$msg\" | head -1 | sed 's/^[^:]*: *//' | cut -c1-20)
-          printf '%-8s %-40s %-25s %-15s %s\n' \"\$status\" \"\$msg_id\" \"\$from\" \"\$topic\" \"\$date_hdr\"
-        done
-      done
-    "
-  else
-    # Local Maildir listing
-    local dir status
-    for dir in "$maildir/new" "$maildir/cur"; do
-      [[ -d "$dir" ]] || continue
+    if [[ "$dir" == */new ]]; then
+      status="unread"
+      [[ "$status_filter" == "done" || "$status_filter" == "handled" ]] && continue
+    else
+      status="done"
+      [[ "$status_filter" == "unread" || "$status_filter" == "pending" ]] && continue
+    fi
 
-      if [[ "$dir" == */new ]]; then
-        status="unread"
-        [[ "$status_filter" == "done" || "$status_filter" == "handled" ]] && continue
-      else
-        status="done"
-        [[ "$status_filter" == "unread" || "$status_filter" == "pending" ]] && continue
-      fi
+    for msg in "$dir"/*; do
+      [[ -f "$msg" ]] || continue
 
-      for msg in "$dir"/*; do
-        [[ -f "$msg" ]] || continue
+      local msg_id from topic date_hdr
+      msg_id=$(email_get_header "$msg" "Message-ID" | tr -d '<>' | cut -c1-38)
+      from=$(email_get_header "$msg" "From" | cut -c1-25)
+      topic=$(email_get_header "$msg" "X-Ohcom-Topic")
+      date_hdr=$(email_get_header "$msg" "Date" | cut -c1-20)
 
-        local msg_id from topic date_hdr
-        msg_id=$(email_get_header "$msg" "Message-ID" | tr -d '<>' | cut -c1-38)
-        from=$(email_get_header "$msg" "From" | cut -c1-25)
-        topic=$(email_get_header "$msg" "X-Ohcom-Topic")
-        date_hdr=$(email_get_header "$msg" "Date" | cut -c1-20)
-
-        printf "%-8s %-40s %-25s %-15s %s\n" "$status" "$msg_id" "$from" "$topic" "$date_hdr"
-      done
+      printf "%-8s %-40s %-25s %-15s %s\n" "$status" "$msg_id" "$from" "$topic" "$date_hdr"
     done
-  fi
+  done
 }
 
 _inbox_send() {
@@ -1022,79 +1011,59 @@ _inbox_send() {
 }
 
 _inbox_read() {
-  [[ $# -ge 1 ]] || die "Usage: ohcommodore inbox read <message-id-prefix>"
-  local msg_prefix="$1"
+  local msg_prefix="" for_identity=""
 
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --for-identity) for_identity="${2:-}"; shift 2 ;;  # Internal: used for delegation
+      *) msg_prefix="$1"; shift ;;
+    esac
+  done
+
+  [[ -n "$msg_prefix" ]] || die "Usage: ohcommodore inbox read <message-id-prefix>"
+
+  # Ships delegate to flagship (where Maildir lives)
+  if maildir_is_remote; then
+    local my_identity
+    my_identity=$(_inbox_identity)
+    flagship_ssh "~/.local/bin/ohcommodore inbox read $(shell_quote "$msg_prefix") --for-identity $(shell_quote "$my_identity")"
+    return
+  fi
+
+  # Local: use for_identity if provided (delegation), otherwise own identity
   local my_identity maildir
-  my_identity=$(_inbox_identity)
+  my_identity="${for_identity:-$(_inbox_identity)}"
   [[ -n "$my_identity" ]] || die "Cannot determine identity"
   maildir=$(maildir_for_identity "$my_identity")
 
-  if maildir_is_remote; then
-    local q_maildir q_prefix
-    q_maildir=$(shell_quote "$maildir")
-    q_prefix=$(shell_quote "$msg_prefix")
-
-    # Remote: find and read on flagship using exit codes (not magic strings)
-    local found ssh_exit=0
-    found=$(flagship_ssh "
-      found=''
-      for dir in $q_maildir/new $q_maildir/cur; do
-        [[ -d \"\$dir\" ]] || continue
-        for msg in \"\$dir\"/*; do
-          [[ -f \"\$msg\" ]] || continue
-          msg_id=\$(grep -i '^Message-ID:' \"\$msg\" | head -1 | sed 's/^[^:]*: *//')
-          if [[ \"\$msg_id\" == *$q_prefix* ]]; then
-            found=\"\$msg\"
-            break 2
-          fi
-        done
-      done
-      [[ -n \"\$found\" ]] || exit 2
-      # If in new/, move to cur/
-      if [[ \"\$found\" == */new/* ]]; then
-        filename=\$(basename \"\$found\")
-        mv \"\$found\" $q_maildir/cur/\"\${filename}:2,S\" || exit 3
-        found=$q_maildir/cur/\"\${filename}:2,S\"
+  # Find message matching prefix
+  local found=""
+  for dir in "$maildir/new" "$maildir/cur"; do
+    [[ -d "$dir" ]] || continue
+    for msg in "$dir"/*; do
+      [[ -f "$msg" ]] || continue
+      local msg_id
+      msg_id=$(email_get_header "$msg" "Message-ID")
+      if [[ "$msg_id" == *"$msg_prefix"* ]]; then
+        found="$msg"
+        break 2
       fi
-      cat \"\$found\"
-    " 2>&1) || ssh_exit=$?
-
-    case "$ssh_exit" in
-      0) echo "$found" ;;
-      2) die "No message found matching '$msg_prefix'" ;;
-      3) die "Failed to claim message matching '$msg_prefix'" ;;
-      *) die "SSH error reading message: exit code $ssh_exit" ;;
-    esac
-  else
-    # Local: find and read
-    local found=""
-    for dir in "$maildir/new" "$maildir/cur"; do
-      [[ -d "$dir" ]] || continue
-      for msg in "$dir"/*; do
-        [[ -f "$msg" ]] || continue
-        local msg_id
-        msg_id=$(email_get_header "$msg" "Message-ID")
-        if [[ "$msg_id" == *"$msg_prefix"* ]]; then
-          found="$msg"
-          break 2
-        fi
-      done
     done
+  done
 
-    [[ -n "$found" ]] || die "No message found matching '$msg_prefix'"
+  [[ -n "$found" ]] || die "No message found matching '$msg_prefix'"
 
-    # If in new/, move to cur/ (mark as read)
-    if [[ "$found" == */new/* ]]; then
-      local filename
-      filename=$(basename "$found")
-      mv "$found" "$maildir/cur/${filename}:2,S"
-      found="$maildir/cur/${filename}:2,S"
-    fi
-
-    # Output message content
-    cat "$found"
+  # If in new/, move to cur/ (mark as read)
+  if [[ "$found" == */new/* ]]; then
+    local filename
+    filename=$(basename "$found")
+    mv "$found" "$maildir/cur/${filename}:2,S"
+    found="$maildir/cur/${filename}:2,S"
   fi
+
+  # Output message content
+  cat "$found"
 }
 
 _inbox_identity() {

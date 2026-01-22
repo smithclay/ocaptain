@@ -65,7 +65,7 @@ ohcommodore inbox list
 ohcommodore inbox list --status done
 
 # Send a command to another ship (use full ship ID)
-ohcommodore inbox send captain@other-repo-d4e5f6 "cargo test"
+ohcommodore inbox send captain@ohcommodore-d4e5f6 "cargo test"
 
 # Send a command to commodore
 ohcommodore inbox send commodore@flagship-host "echo 'Report from ship'"
@@ -74,7 +74,7 @@ ohcommodore inbox send commodore@flagship-host "echo 'Report from ship'"
 ohcommodore inbox identity
 
 # Manual message management
-ohcommodore inbox read <id>        # Mark handled and return message JSON
+ohcommodore inbox read <id>        # Mark as read and return raw message content
 ```
 
 ## Environment Variables
@@ -107,8 +107,8 @@ The messaging system uses email over SSH tunnels for inter-node communication.
 ### Architecture
 
 - **Flagship**: Runs OpenSMTPD on localhost:25, delivers to per-identity Maildirs
-- **Ships**: SSH tunnel to flagship:25 via autossh, send mail via sendmail
-- **Storage**: Standard Maildir format (`~/Maildir/<identity>/{new,cur,tmp}`)
+- **Ships**: SSH tunnel to flagship:25 via autossh, send mail via msmtp (sendmail-compatible)
+- **Storage**: Standard Maildir format (`~/Maildir/<domain>/{new,cur,tmp}`) where `<domain>` is extracted from the identity (e.g., `captain@ohcommodore-abc123` → `~/Maildir/ohcommodore-abc123/`)
 
 ### Message Format
 
@@ -116,12 +116,22 @@ Messages are standard RFC 5322 emails with custom `X-Ohcom-*` headers:
 
 ```
 From: commodore@flagship
-To: ship-a1b2c3@flagship
+To: captain@ohcommodore-abc123
 Subject: cmd.exec
+Message-ID: <uuid@flagship>
+Date: Mon, 20 Jan 2026 19:12:03 +0000
 X-Ohcom-Topic: cmd.exec
 X-Ohcom-Request-ID: req-123
 
 cd ~/myrepo && cargo test
+```
+
+Result messages include an exit code header:
+
+```
+X-Ohcom-Topic: cmd.result
+X-Ohcom-Request-ID: req-123
+X-Ohcom-Exit-Code: 0
 ```
 
 ### Protocol Topics
@@ -134,12 +144,29 @@ cd ~/myrepo && cargo test
 ### Debugging
 
 ```bash
-# See pending messages
+# See pending messages (on flagship)
 ls ~/Maildir/*/new/
 
-# Read message history
+# Check OpenSMTPD status (on flagship)
+systemctl status opensmtpd
+smtpctl show queue
+
+# Check autossh tunnel status (on ships)
+systemctl status ohcom-tunnel
+
+# Read message history with mutt
 mutt -f ~/Maildir/commodore/
 
 # Watch for new mail
 watch -n1 'ls ~/Maildir/*/new/'
 ```
+
+### Security
+
+The email messaging system executes commands from `cmd.exec` messages without sanitization. This is by design for trusted internal use. Security relies on:
+
+1. **SSH tunnel isolation**: Ships connect to flagship SMTP only via authenticated SSH tunnels
+2. **localhost-only SMTP**: OpenSMTPD on flagship listens only on localhost (127.0.0.1)
+3. **Network isolation**: exe.dev VMs are not publicly accessible
+
+**Do not expose the messaging system to untrusted sources.** Any entity that can send mail to the flagship can execute arbitrary commands on ships.

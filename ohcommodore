@@ -31,14 +31,19 @@ uuid_gen() {
   uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid
 }
 
+# Shell-escape a value for safe embedding in SSH commands
+shell_quote() {
+  printf '%q' "$1"
+}
+
 # Maildir helpers
 maildir_root() { echo "$HOME/Maildir"; }
 
 maildir_for_identity() {
   local identity="$1"
-  # Extract local part from identity (e.g., "captain@ship-abc123" -> "ship-abc123")
-  local local_part="${identity#*@}"
-  echo "$(maildir_root)/$local_part"
+  # Extract domain part from identity (e.g., "captain@ship-abc123" -> "ship-abc123")
+  local domain_part="${identity#*@}"
+  echo "$(maildir_root)/$domain_part"
 }
 
 ensure_maildir() {
@@ -56,38 +61,58 @@ maildir_is_remote() {
 
 # List new message files in Maildir
 # Returns list of paths (relative to home on flagship for remote)
+# Returns empty on no messages; exits non-zero on SSH/access failure
 maildir_list_new() {
   local maildir="$1"
+  local q_maildir
+  q_maildir=$(shell_quote "$maildir")
+
   if maildir_is_remote; then
-    flagship_ssh "ls '$maildir/new/'* 2>/dev/null || true"
+    # Use exit code to distinguish "no files" (0) from "error" (non-zero)
+    flagship_ssh "ls $q_maildir/new/* 2>/dev/null; exit 0" || {
+      log "Warning: Failed to list remote Maildir $maildir"
+      return 0  # Return empty rather than failing scheduler loop
+    }
   else
     ls "$maildir/new/"* 2>/dev/null || true
   fi
 }
 
 # Claim a message (move from new/ to cur/)
-# For remote: also copies message locally for processing
-# Returns path to local claimed message
+# For remote: atomically moves and outputs content in one SSH call
+# Returns path to local claimed message, or empty on failure
 maildir_claim() {
   local msg_path="$1" maildir="$2"
-  local filename
+  local filename claimed_name
   filename=$(basename "$msg_path")
-  local claimed_name="${filename}:2,S"
+  claimed_name="${filename}:2,S"
 
   if maildir_is_remote; then
-    # Claim on flagship (move to cur/)
-    flagship_ssh "mv '$msg_path' '$maildir/cur/$claimed_name'"
-    # Copy to local Maildir for processing
+    local q_msg q_maildir q_claimed
+    q_msg=$(shell_quote "$msg_path")
+    q_maildir=$(shell_quote "$maildir")
+    q_claimed=$(shell_quote "$claimed_name")
+
+    # Atomic: move and cat in single SSH to avoid race conditions
     ensure_maildir "$maildir"
-    flagship_ssh "cat '$maildir/cur/$claimed_name'" > "$maildir/cur/$claimed_name"
+    if ! flagship_ssh "mv $q_msg $q_maildir/cur/$q_claimed && cat $q_maildir/cur/$q_claimed" \
+         > "$maildir/cur/$claimed_name" 2>/dev/null; then
+      log "Warning: Failed to claim message $msg_path"
+      rm -f "$maildir/cur/$claimed_name" 2>/dev/null
+      return 1
+    fi
     echo "$maildir/cur/$claimed_name"
   else
-    mv "$msg_path" "$maildir/cur/$claimed_name"
+    if ! mv "$msg_path" "$maildir/cur/$claimed_name" 2>/dev/null; then
+      log "Warning: Failed to claim local message $msg_path"
+      return 1
+    fi
     echo "$maildir/cur/$claimed_name"
   fi
 }
 
 # Email composition and sending
+# Returns message ID on success, exits non-zero on failure
 send_email() {
   local from="$1" to="$2" subject="$3" body="$4"
   shift 4
@@ -97,7 +122,7 @@ send_email() {
   msg_id="<$(uuid_gen)@${from#*@}>"
   date_header=$(date -R)
 
-  {
+  if ! {
     echo "From: $from"
     echo "To: $to"
     echo "Subject: $subject"
@@ -109,7 +134,10 @@ send_email() {
     done
     echo ""
     echo "$body"
-  } | sendmail -t
+  } | sendmail -t; then
+    log "Warning: sendmail failed for message to $to"
+    return 1
+  fi
 
   echo "$msg_id"
 }
@@ -824,7 +852,7 @@ EOF
   local flagship_hostname
   flagship_hostname=$(hostname -f 2>/dev/null || hostname)
 
-  # Create common config and v2 queue state
+  # Create common config and email messaging state
   init_common "commodore@$flagship_hostname"
 
   # Create ships table (commodore-only)
@@ -872,7 +900,7 @@ EOF
     ship_identity="captain@$(hostname -f 2>/dev/null || hostname)"
   fi
 
-  # Create common config and v2 queue state
+  # Create common config and email messaging state
   init_common "$ship_identity"
 
   log "Captain initialized${repo:+ for $repo}."
@@ -899,6 +927,12 @@ _inbox_list() {
     status_filter="$2"
   fi
 
+  # Validate status_filter to prevent injection
+  case "$status_filter" in
+    all|done|handled|unread|pending) ;;
+    *) die "Invalid status filter: $status_filter" ;;
+  esac
+
   local my_identity maildir
   my_identity=$(_inbox_identity)
   [[ -n "$my_identity" ]] || die "Cannot determine identity"
@@ -908,9 +942,12 @@ _inbox_list() {
   echo "-------- ---------------------------------------- ------------------------- --------------- --------------------"
 
   if maildir_is_remote; then
+    local q_maildir
+    q_maildir=$(shell_quote "$maildir")
+
     # Remote Maildir listing - parse on flagship side
     flagship_ssh "
-      for dir in '$maildir/new' '$maildir/cur'; do
+      for dir in $q_maildir/new $q_maildir/cur; do
         [[ -d \"\$dir\" ]] || continue
         if [[ \"\$dir\" == */new ]]; then
           status='unread'
@@ -994,35 +1031,41 @@ _inbox_read() {
   maildir=$(maildir_for_identity "$my_identity")
 
   if maildir_is_remote; then
-    # Remote: find and read on flagship
-    local found
+    local q_maildir q_prefix
+    q_maildir=$(shell_quote "$maildir")
+    q_prefix=$(shell_quote "$msg_prefix")
+
+    # Remote: find and read on flagship using exit codes (not magic strings)
+    local found ssh_exit=0
     found=$(flagship_ssh "
       found=''
-      for dir in '$maildir/new' '$maildir/cur'; do
+      for dir in $q_maildir/new $q_maildir/cur; do
         [[ -d \"\$dir\" ]] || continue
         for msg in \"\$dir\"/*; do
           [[ -f \"\$msg\" ]] || continue
           msg_id=\$(grep -i '^Message-ID:' \"\$msg\" | head -1 | sed 's/^[^:]*: *//')
-          if [[ \"\$msg_id\" == *'$msg_prefix'* ]]; then
+          if [[ \"\$msg_id\" == *$q_prefix* ]]; then
             found=\"\$msg\"
             break 2
           fi
         done
       done
-      [[ -n \"\$found\" ]] || { echo 'ERROR:NOT_FOUND'; exit 1; }
+      [[ -n \"\$found\" ]] || exit 2
       # If in new/, move to cur/
       if [[ \"\$found\" == */new/* ]]; then
         filename=\$(basename \"\$found\")
-        mv \"\$found\" '$maildir/cur/'\"\${filename}:2,S\"
-        found='$maildir/cur/'\"\${filename}:2,S\"
+        mv \"\$found\" $q_maildir/cur/\"\${filename}:2,S\" || exit 3
+        found=$q_maildir/cur/\"\${filename}:2,S\"
       fi
       cat \"\$found\"
-    " 2>&1) || true
+    " 2>&1) || ssh_exit=$?
 
-    if [[ "$found" == "ERROR:NOT_FOUND" ]]; then
-      die "No message found matching '$msg_prefix'"
-    fi
-    echo "$found"
+    case "$ssh_exit" in
+      0) echo "$found" ;;
+      2) die "No message found matching '$msg_prefix'" ;;
+      3) die "Failed to claim message matching '$msg_prefix'" ;;
+      *) die "SSH error reading message: exit code $ssh_exit" ;;
+    esac
   else
     # Local: find and read
     local found=""
@@ -1093,11 +1136,16 @@ cmd__scheduler() {
     new_files=$(maildir_list_new "$maildir")
 
     while IFS= read -r msg; do
-      [[ -n "$msg" && "$msg" != *"No such file"* ]] || continue
+      # Skip empty lines and error messages from ls
+      [[ -n "$msg" ]] || continue
+      [[ "$msg" != *"No such file"* && "$msg" != *"cannot access"* ]] || continue
 
       local topic claimed_msg
       # Claim message (moves to cur/, copies locally if remote)
-      claimed_msg=$(maildir_claim "$msg" "$maildir")
+      if ! claimed_msg=$(maildir_claim "$msg" "$maildir"); then
+        log "Failed to claim message: $msg"
+        continue
+      fi
       [[ -f "$claimed_msg" ]] || continue
 
       topic=$(email_get_header "$claimed_msg" "X-Ohcom-Topic")
@@ -1109,8 +1157,11 @@ cmd__scheduler() {
         cmd.result)
           _scheduler_handle_cmd_result "$claimed_msg"
           ;;
+        "")
+          log "Missing X-Ohcom-Topic header in message, skipping: $claimed_msg"
+          ;;
         *)
-          log "Unknown topic '$topic' in message, skipping"
+          log "Unknown topic '$topic' in message, skipping: $claimed_msg"
           ;;
       esac
     done <<< "$new_files"

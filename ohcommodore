@@ -31,6 +31,74 @@ uuid_gen() {
   uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid
 }
 
+# Maildir helpers
+maildir_root() { echo "$HOME/Maildir"; }
+
+maildir_for_identity() {
+  local identity="$1"
+  # Extract local part from identity (e.g., "captain@ship-abc123" -> "ship-abc123")
+  local local_part="${identity#*@}"
+  echo "$(maildir_root)/$local_part"
+}
+
+ensure_maildir() {
+  local maildir="$1"
+  mkdir -p "$maildir"/{new,cur,tmp}
+}
+
+# Email composition and sending
+send_email() {
+  local from="$1" to="$2" subject="$3" body="$4"
+  shift 4
+  # Remaining args are extra headers (key: value format)
+
+  local msg_id date_header
+  msg_id="<$(uuid_gen)@${from#*@}>"
+  date_header=$(date -R)
+
+  {
+    echo "From: $from"
+    echo "To: $to"
+    echo "Subject: $subject"
+    echo "Message-ID: $msg_id"
+    echo "Date: $date_header"
+    # Add extra headers
+    for header in "$@"; do
+      echo "$header"
+    done
+    echo ""
+    echo "$body"
+  } | sendmail -t
+
+  echo "$msg_id"
+}
+
+send_reply() {
+  local orig_msg="$1" from="$2" subject="$3" body="$4"
+  shift 4
+
+  local orig_msgid orig_from
+  orig_msgid=$(grep -i '^Message-ID:' "$orig_msg" | head -1 | sed 's/^[^:]*: *//')
+  orig_from=$(grep -i '^From:' "$orig_msg" | head -1 | sed 's/^[^:]*: *//')
+
+  send_email "$from" "$orig_from" "$subject" "$body" \
+    "In-Reply-To: $orig_msgid" \
+    "References: $orig_msgid" \
+    "$@"
+}
+
+# Parse email message
+email_get_header() {
+  local msg="$1" header="$2"
+  grep -i "^${header}:" "$msg" | head -1 | sed 's/^[^:]*: *//'
+}
+
+email_get_body() {
+  local msg="$1"
+  # Body starts after first blank line
+  sed -n '/^$/,$p' "$msg" | tail -n +2
+}
+
 # Portable base64 decode (works on both Linux and macOS)
 base64_decode() {
   openssl base64 -d -A

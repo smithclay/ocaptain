@@ -1,0 +1,21 @@
+repos:
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        args:
+          - "-x"  # Follow sourced files
+          - "-e"
+          - "SC2029"  # Client-side expansion in SSH is intentional for remote paths
+          - "-e"
+          - "SC2088"  # Tilde in quotes is intentional for SSH remote paths
+          - "-e"
+          - "SC1091"  # Can't follow sourced files (test helpers exist)
+          - "-e"
+          - "SC2016"  # Single quotes in SSH commands are intentional (run on remote)
+
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.10.0-1
+    hooks:
+      - id: shfmt
+        args: ["-i", "4", "-ci", "-bn"]  # 4-space indent, indent case, binary ops on new line

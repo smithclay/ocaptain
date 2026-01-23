@@ -34,10 +34,10 @@ ohcommodore ship ssh reponame
 # Destroy a ship
 ohcommodore ship destroy reponame
 
-# Destroy all ships
+# Destroy all ships (direct cleanup; bypasses flagship)
 ohcommodore fleet sink
 
-# Destroy everything (ships + flagship)
+# Destroy everything (ships + flagship, direct cleanup)
 ohcommodore fleet sink --scuttle
 ```
 

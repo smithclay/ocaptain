@@ -46,7 +46,7 @@ main() {
     return 1
   fi
 
-  assert_contains "Flagship created" "$init_output" "Flagship created"
+  assert_contains "Flagship created" "$init_output" "Done! Cluster"
   assert "Config file exists" "[[ -f '$HOME/.ohcommodore/config.json' ]]"
 
   local flagship_dest
@@ -109,15 +109,21 @@ main() {
   fi
 
   # ============================================
-  # Test 6: Ship has v2 queue initialized
+  # Test 6: Ship has Maildir initialized
   # ============================================
-  log_test "Checking v2 queue initialization on ship..."
+  log_test "Checking Maildir initialization on ship..."
 
-  local queue_check
-  queue_check=$(test_ssh "$ship_dest" 'ls -la ~/.ohcommodore/ns/default/q/ 2>/dev/null' || echo "")
+  local maildir_check
+  maildir_check=$(test_ssh "$ship_dest" 'ls -la ~/Maildir/ 2>/dev/null' || echo "")
 
-  assert_contains "Ship has inbound queue" "$queue_check" "inbound"
-  assert_contains "Ship has dead queue" "$queue_check" "dead"
+  # Ship should have a Maildir directory created
+  assert "Ship has Maildir directory" "[[ -n '$maildir_check' && '$maildir_check' != *'No such file'* ]]"
+
+  # Check for standard Maildir subdirectories (new, cur, tmp)
+  local maildir_subdirs
+  maildir_subdirs=$(test_ssh "$ship_dest" 'ls ~/Maildir/*/new ~/Maildir/*/cur ~/Maildir/*/tmp 2>/dev/null | wc -l' 2>&1 | tr -d '[:space:]')
+  [[ "$maildir_subdirs" =~ ^[0-9]+$ ]] || maildir_subdirs=0
+  assert "Ship has Maildir subdirectories (new/cur/tmp)" "[[ '$maildir_subdirs' -ge 1 ]]"
 
   # ============================================
   # Test 7: Destroy ship
@@ -140,8 +146,8 @@ main() {
 
   status_output=$("$PROJECT_ROOT/ohcommodore" fleet status 2>&1)
 
-  # Ship should no longer appear
-  assert "Ship removed from fleet" "! echo '$status_output' | grep -q '$ship_name'"
+  # Ship should no longer appear in the ships list (check for ship ID pattern, not just repo name)
+  assert "Ship removed from fleet" "! echo '$status_output' | grep -qE '^  $ship_name-'"
 
   # ============================================
   # Test 9: Scuttle (cleanup happens via trap)

@@ -31,6 +31,143 @@ uuid_gen() {
   uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid
 }
 
+# Shell-escape a value for safe embedding in SSH commands
+shell_quote() {
+  printf '%q' "$1"
+}
+
+# Maildir helpers
+maildir_root() { echo "$HOME/Maildir"; }
+
+maildir_for_identity() {
+  local identity="$1"
+  # Extract domain part from identity (e.g., "captain@ship-abc123" -> "ship-abc123")
+  local domain_part="${identity#*@}"
+  echo "$(maildir_root)/$domain_part"
+}
+
+ensure_maildir() {
+  local maildir="$1"
+  mkdir -p "$maildir"/{new,cur,tmp}
+}
+
+# Remote Maildir helpers (for ships accessing flagship's Maildir)
+# Returns 0 if current role requires remote Maildir access
+maildir_is_remote() {
+  local role
+  role=$(get_role)
+  [[ "$role" == "captain" ]]
+}
+
+# List new message files in Maildir
+# Returns list of paths (relative to home on flagship for remote)
+# Returns empty on no messages; exits non-zero on SSH/access failure
+maildir_list_new() {
+  local maildir="$1"
+  local q_maildir
+  q_maildir=$(shell_quote "$maildir")
+
+  if maildir_is_remote; then
+    # Use exit code to distinguish "no files" (0) from "error" (non-zero)
+    flagship_ssh "ls $q_maildir/new/* 2>/dev/null; exit 0" || {
+      log "Warning: Failed to list remote Maildir $maildir"
+      return 0  # Return empty rather than failing scheduler loop
+    }
+  else
+    ls "$maildir/new/"* 2>/dev/null || true
+  fi
+}
+
+# Claim a message (move from new/ to cur/)
+# For remote: atomically moves and outputs content in one SSH call
+# Returns path to local claimed message, or empty on failure
+maildir_claim() {
+  local msg_path="$1" maildir="$2"
+  local filename claimed_name
+  filename=$(basename "$msg_path")
+  claimed_name="${filename}:2,S"
+
+  if maildir_is_remote; then
+    local q_msg q_maildir q_claimed
+    q_msg=$(shell_quote "$msg_path")
+    q_maildir=$(shell_quote "$maildir")
+    q_claimed=$(shell_quote "$claimed_name")
+
+    # Atomic: move and cat in single SSH to avoid race conditions
+    ensure_maildir "$maildir"
+    if ! flagship_ssh "mv $q_msg $q_maildir/cur/$q_claimed && cat $q_maildir/cur/$q_claimed" \
+         > "$maildir/cur/$claimed_name" 2>/dev/null; then
+      log "Warning: Failed to claim message $msg_path"
+      rm -f "$maildir/cur/$claimed_name" 2>/dev/null
+      return 1
+    fi
+    echo "$maildir/cur/$claimed_name"
+  else
+    if ! mv "$msg_path" "$maildir/cur/$claimed_name" 2>/dev/null; then
+      log "Warning: Failed to claim local message $msg_path"
+      return 1
+    fi
+    echo "$maildir/cur/$claimed_name"
+  fi
+}
+
+# Email composition and sending
+# Returns message ID on success, exits non-zero on failure
+send_email() {
+  local from="$1" to="$2" subject="$3" body="$4"
+  shift 4
+  # Remaining args are extra headers (key: value format)
+
+  local msg_id date_header
+  msg_id="<$(uuid_gen)@${from#*@}>"
+  date_header=$(date -R)
+
+  if ! {
+    echo "From: $from"
+    echo "To: $to"
+    echo "Subject: $subject"
+    echo "Message-ID: $msg_id"
+    echo "Date: $date_header"
+    # Add extra headers
+    for header in "$@"; do
+      echo "$header"
+    done
+    echo ""
+    echo "$body"
+  } | sendmail -t; then
+    log "Warning: sendmail failed for message to $to"
+    return 1
+  fi
+
+  echo "$msg_id"
+}
+
+send_reply() {
+  local orig_msg="$1" from="$2" subject="$3" body="$4"
+  shift 4
+
+  local orig_msgid orig_from
+  orig_msgid=$(grep -i '^Message-ID:' "$orig_msg" | head -1 | sed 's/^[^:]*: *//')
+  orig_from=$(grep -i '^From:' "$orig_msg" | head -1 | sed 's/^[^:]*: *//')
+
+  send_email "$from" "$orig_from" "$subject" "$body" \
+    "In-Reply-To: $orig_msgid" \
+    "References: $orig_msgid" \
+    "$@"
+}
+
+# Parse email message
+email_get_header() {
+  local msg="$1" header="$2"
+  grep -i "^${header}:" "$msg" | head -1 | sed 's/^[^:]*: *//'
+}
+
+email_get_body() {
+  local msg="$1"
+  # Body starts after first blank line
+  sed -n '/^$/,$p' "$msg" | tail -n +2
+}
+
 # Portable base64 decode (works on both Linux and macOS)
 base64_decode() {
   openssl base64 -d -A
@@ -96,471 +233,25 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
 }
 
-# Namespace helpers (v2 queue system)
+# Namespace helpers
 ns() { echo "${OHCOM_NS:-default}"; }
 ns_root() { echo "$HOME/.ohcommodore/ns/$(ns)"; }
 msg_db() { echo "$(ns_root)/data.duckdb"; }
-q_root() { echo "$(ns_root)/q"; }
-q_inbound() { echo "$(q_root)/inbound"; }
-q_incoming() { echo "$(q_inbound)/.incoming"; }
-q_dead() { echo "$(q_root)/dead"; }
-q_outbound() { echo "$(q_root)/outbound"; }
 artifacts_root() { echo "$(ns_root)/artifacts"; }
-nq_dir() { echo "$(ns_root)/nq"; }
 
 # Default command timeout: 5 minutes
 CMD_TIMEOUT_S="${CMD_TIMEOUT_S:-300}"
-
-queue_init_dirs() {
-  mkdir -p \
-    "$(q_inbound)" \
-    "$(q_incoming)" \
-    "$(q_dead)" \
-    "$(q_outbound)" \
-    "$(artifacts_root)" \
-    "$(nq_dir)"
-}
 
 init_messages_db() {
   local db
   db="$(msg_db)"
   mkdir -p "$(dirname "$db")"
   duckdb "$db" "
-    CREATE TABLE IF NOT EXISTS messages (
-      message_id TEXT PRIMARY KEY,
-      created_at TIMESTAMP NOT NULL,
-      source TEXT NOT NULL,
-      dest TEXT NOT NULL,
-      topic TEXT NOT NULL,
-      payload_json TEXT NOT NULL,
-      ingested_at TIMESTAMP DEFAULT current_timestamp,
-      handled_at TIMESTAMP,
-      submitted INTEGER
+    CREATE TABLE IF NOT EXISTS config (
+      key TEXT PRIMARY KEY,
+      value TEXT
     );
   "
-}
-
-write_msg_file() {
-  local topic="$1"
-  local dest="$2"
-  local payload_json="$3"
-
-  local msg_id ts source tmpfile finalfile
-  msg_id=$(uuid_gen)
-  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  source=$(_inbox_identity 2>/dev/null)
-  if [[ -z "$source" || "$source" == "null" ]]; then
-    die "Cannot determine identity. Has this node been initialized?"
-  fi
-
-  local outdir
-  outdir="$(q_outbound)"
-  mkdir -p "$outdir"
-
-  tmpfile="$outdir/msg.${ts//[:-]/}.${msg_id}.json.tmp"
-  finalfile="${tmpfile%.tmp}"
-
-  jq -n \
-    --arg msg_id "$msg_id" \
-    --arg created_at "$ts" \
-    --arg source "$source" \
-    --arg dest "$dest" \
-    --arg topic "$topic" \
-    --argjson payload "$payload_json" \
-    '{
-      message_id: $msg_id,
-      created_at: $created_at,
-      source: $source,
-      dest: $dest,
-      topic: $topic,
-      payload: $payload
-    }' > "$tmpfile"
-
-  mv "$tmpfile" "$finalfile"
-  echo "$finalfile"
-}
-
-deliver_msg_file() {
-  local local_path="$1" dest_ssh="$2" retries="${3:-3}"
-  local filename remote_incoming remote_inbound last_err
-  filename=$(basename "$local_path")
-  remote_incoming="~/.ohcommodore/ns/$(ns)/q/inbound/.incoming"
-  remote_inbound="~/.ohcommodore/ns/$(ns)/q/inbound"
-
-  for ((i = 1; i <= retries; i++)); do
-    # Create remote directories first (before SCP)
-    if ! last_err=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$dest_ssh" \
-         "mkdir -p $remote_incoming $remote_inbound" 2>&1); then
-      log "Delivery attempt $i/$retries: mkdir failed: $last_err"
-      sleep "$i"
-      continue
-    fi
-
-    # SCP to staging directory
-    if ! last_err=$(scp -q -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-         "$local_path" "${dest_ssh}:${remote_incoming}/${filename}" 2>&1); then
-      log "Delivery attempt $i/$retries: scp failed: $last_err"
-      sleep "$i"
-      continue
-    fi
-
-    # Atomic rename to final location
-    if ! last_err=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$dest_ssh" \
-         "mv ${remote_incoming}/${filename} ${remote_inbound}/" 2>&1); then
-      log "Delivery attempt $i/$retries: mv failed: $last_err"
-      sleep "$i"
-      continue
-    fi
-
-    rm -f "$local_path"
-    return 0
-  done
-  log "ERROR: Failed to deliver message after $retries attempts to $dest_ssh"
-  return 1
-}
-
-ingest_queue_file() {
-  local file_path="$1"
-  local db
-  db="$(msg_db)"
-
-  # Parse JSON
-  local msg_id created_at source dest topic payload_json
-  msg_id=$(jq -r '.message_id' "$file_path")
-  created_at=$(jq -r '.created_at' "$file_path")
-  source=$(jq -r '.source' "$file_path")
-  dest=$(jq -r '.dest' "$file_path")
-  topic=$(jq -r '.topic' "$file_path")
-  payload_json=$(jq -c '.payload' "$file_path")
-
-  # Escape for SQL
-  local esc_msg_id esc_source esc_dest esc_topic esc_payload
-  esc_msg_id=$(sql_escape "$msg_id")
-  esc_source=$(sql_escape "$source")
-  esc_dest=$(sql_escape "$dest")
-  esc_topic=$(sql_escape "$topic")
-  esc_payload=$(sql_escape "$payload_json")
-
-  # Insert with ON CONFLICT for idempotency
-  local db_err
-  if db_err=$(duckdb "$db" "
-    INSERT INTO messages (message_id, created_at, source, dest, topic, payload_json)
-    VALUES ('$esc_msg_id', '$created_at', '$esc_source', '$esc_dest', '$esc_topic', '$esc_payload')
-    ON CONFLICT (message_id) DO NOTHING;
-  " 2>&1); then
-    # Ack: remove file
-    rm -f "$file_path"
-  else
-    # Deadletter: move to dead queue with reason (include actual error)
-    local filename
-    filename=$(basename "$file_path")
-    mv "$file_path" "$(q_dead)/$filename"
-    echo "DuckDB insert failed: $db_err" > "$(q_dead)/${filename%.json}.reason"
-    die "Failed to ingest message $msg_id: $db_err"
-  fi
-}
-
-# Daemon support functions (v2 queue system)
-DAEMON_SHUTDOWN=0
-
-daemon_shutdown_handler() {
-  log "Shutdown signal received, finishing current work..."
-  DAEMON_SHUTDOWN=1
-}
-
-daemon_recover_claimed() {
-  local inbound f
-  inbound="$(q_inbound)"
-  # Deadletter old claims (>5 min), retry recent ones
-  for f in "$inbound"/.claimed.*.json; do
-    [[ -f "$f" ]] || continue
-    local filename="${f##*/.claimed.}"
-    if find "$f" -mmin +5 -print -quit | grep -q .; then
-      mv "$f" "$(q_dead)/$filename"
-      echo "Abandoned claim (exceeded 5-minute threshold)" > "$(q_dead)/${filename%.json}.reason"
-      log "Deadlettered abandoned claim: $filename"
-    else
-      mv "$f" "$inbound/$filename"
-      log "Recovered claimed file for retry: $filename"
-    fi
-  done
-}
-
-daemon_claim_one() {
-  local inbound file filename claimed_path
-  inbound="$(q_inbound)"
-
-  # Find first visible message file
-  for file in "$inbound"/msg.*.json; do
-    [[ -f "$file" ]] || continue
-
-    filename=$(basename "$file")
-    claimed_path="$inbound/.claimed.$filename"
-
-    # Atomic claim via rename
-    if mv "$file" "$claimed_path" 2>/dev/null; then
-      echo "$claimed_path"
-      return 0
-    fi
-  done
-
-  # No messages to claim
-  return 1
-}
-
-emit_cmd_result() {
-  local request_id="$1"
-  local exit_code="$2"
-  local stdout_path="$3"
-  local stderr_path="$4"
-  local started_at="$5"
-  local ended_at="$6"
-  local dest="$7"
-
-  local hostname
-  hostname=$(hostname -f 2>/dev/null || hostname)
-
-  # Build paths that include hostname (artifacts stay on ship)
-  local remote_stdout_path remote_stderr_path
-  remote_stdout_path="${hostname}:${stdout_path}"
-  remote_stderr_path="${hostname}:${stderr_path}"
-
-  local payload_json
-  payload_json=$(jq -n \
-    --arg request_id "$request_id" \
-    --argjson exit_code "$exit_code" \
-    --arg stdout_path "$remote_stdout_path" \
-    --arg stderr_path "$remote_stderr_path" \
-    --arg started_at "$started_at" \
-    --arg ended_at "$ended_at" \
-    '{
-      request_id: $request_id,
-      exit_code: $exit_code,
-      stdout_path: $stdout_path,
-      stderr_path: $stderr_path,
-      started_at: $started_at,
-      ended_at: $ended_at
-    }')
-
-  write_msg_file "cmd.result" "$dest" "$payload_json"
-}
-
-# Fetch next unhandled cmd.exec message for this identity
-# Outputs JSON: {"msg_id":"...", "cmd":"...", "cwd":"...", "timeout_s":..., "request_id":"...", "source":"..."}
-# Returns 1 if no message found
-fetch_pending_cmd_exec() {
-  local my_identity="$1"
-  local escaped_identity
-  escaped_identity=$(sql_escape "$my_identity")
-
-  local msg_row
-  if ! msg_row=$(duckdb "$(msg_db)" -json "
-    SELECT message_id, payload_json, source
-    FROM messages
-    WHERE dest = '$escaped_identity'
-      AND topic = 'cmd.exec'
-      AND handled_at IS NULL
-      AND submitted IS NULL
-    ORDER BY created_at
-    LIMIT 1
-  " 2>&1); then
-    log "ERROR: Failed to query messages database: $msg_row"
-    return 1
-  fi
-
-  [[ -n "$msg_row" && "$msg_row" != "[]" ]] || return 1
-
-  # Extract fields and output as JSON for caller
-  local msg_id payload_json source cmd cwd timeout_s request_id
-  msg_id=$(echo "$msg_row" | jq -r '.[0].message_id')
-  payload_json=$(echo "$msg_row" | jq -r '.[0].payload_json')
-  source=$(echo "$msg_row" | jq -r '.[0].source')
-
-  # SECURITY NOTE: Commands from inbox are executed without sanitization.
-  # This is intentional - the inbox system is designed to execute arbitrary commands.
-  # Ensure the inbox queue is only writable by trusted sources (SSH key authentication).
-  cmd=$(echo "$payload_json" | jq -r '.cmd')
-  cwd=$(echo "$payload_json" | jq -r '.cwd // "~"')
-  timeout_s=$(echo "$payload_json" | jq -r '.timeout_s // 1800')
-  request_id=$(echo "$payload_json" | jq -r '.request_id // empty')
-
-  jq -n \
-    --arg msg_id "$msg_id" \
-    --arg cmd "$cmd" \
-    --arg cwd "$cwd" \
-    --argjson timeout_s "$timeout_s" \
-    --arg request_id "$request_id" \
-    --arg source "$source" \
-    '{msg_id: $msg_id, cmd: $cmd, cwd: $cwd, timeout_s: $timeout_s, request_id: $request_id, source: $source}'
-}
-
-# Mark message as handled and emit result to source
-complete_cmd_exec() {
-  local msg_id="$1"
-  local source="$2"
-  local request_id="$3"
-  local exit_code="$4"
-  local artifact_dir="$5"
-  local started_at="$6"
-  local ended_at="$7"
-
-  local escaped_msg_id
-  escaped_msg_id=$(sql_escape "$msg_id")
-
-  duckdb "$(msg_db)" "UPDATE messages SET handled_at = current_timestamp, submitted = NULL WHERE message_id = '$escaped_msg_id'"
-
-  if [[ -n "$source" ]]; then
-    emit_cmd_result \
-      "${request_id:-$msg_id}" \
-      "$exit_code" \
-      "$artifact_dir/stdout.txt" \
-      "$artifact_dir/stderr.txt" \
-      "$started_at" \
-      "$ended_at" \
-      "$source" >/dev/null
-  fi
-}
-
-# Submit a command to nq for sequential execution
-nq_submit_job() {
-  local msg_id="$1"
-  local cmd="$2"
-  local cwd="$3"
-  local artifact_id="$4"
-  local source="$5"
-  local request_id="$6"
-
-  local artifact_dir nq_home
-  artifact_dir="$(artifacts_root)/$artifact_id"
-  nq_home="$(nq_dir)"
-  mkdir -p "$artifact_dir"
-
-  # Expand ~ in cwd
-  cwd="${cwd/#\~/$HOME}"
-
-  # Record start time
-  local started_at
-  started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-  # Submit to nq (sequential queue)
-  # nq outputs the job filename (e.g., ,1234567890.123)
-  local nq_job
-  nq_job=$(cd "${cwd:-.}" 2>/dev/null || cd ~; NQDIR="$nq_home" nq timeout "$CMD_TIMEOUT_S" bash -c "$cmd")
-
-  # Store job metadata for later lookup (avoid DB queries during reap)
-  local meta_file="$nq_home/${nq_job}.meta"
-  cat > "$meta_file" << EOF
-msg_id=$msg_id
-artifact_dir=$artifact_dir
-started_at=$started_at
-source=$source
-request_id=$request_id
-EOF
-
-  log "Submitted to nq: msg=$msg_id job=$nq_job"
-}
-
-# Check nq jobs for completion, reap finished ones
-nq_check_jobs() {
-  local nq_home
-  nq_home="$(nq_dir)"
-
-  for job_file in "$nq_home"/,*; do
-    [[ -f "$job_file" ]] || continue
-    [[ "$job_file" == *.meta ]] && continue  # skip metadata files
-
-    # Job still running if execute bit is set
-    [[ -x "$job_file" ]] && continue
-
-    # Job complete - find its metadata
-    local meta_file="${job_file}.meta"
-    [[ -f "$meta_file" ]] || continue
-
-    # Read metadata from file (key=value format) - safe parsing without eval
-    local msg_id artifact_dir started_at msg_source request_id
-    while IFS='=' read -r key value; do
-      case "$key" in
-        msg_id) msg_id="$value" ;;
-        artifact_dir) artifact_dir="$value" ;;
-        started_at) started_at="$value" ;;
-        source) msg_source="$value" ;;
-        request_id) request_id="$value" ;;
-      esac
-    done < "$meta_file"
-
-    if [[ -z "$msg_id" || -z "$artifact_dir" ]]; then
-      log "Warning: Invalid metadata in $meta_file - skipping"
-      continue
-    fi
-
-    log "Reaping job for msg=$msg_id"
-
-    # Ensure artifact_dir exists
-    mkdir -p "$artifact_dir"
-
-    # Copy nq output to artifact (nq captures stdout/stderr in job file)
-    # Skip the first line (exec command) for cleaner output
-    tail -n +2 "$job_file" > "$artifact_dir/stdout.txt" 2>/dev/null || true
-    echo "" > "$artifact_dir/stderr.txt"
-
-    # Determine exit code - nq doesn't capture it, check for timeout signature
-    local exit_code=0
-    if grep -q "^Killed$" "$artifact_dir/stdout.txt" 2>/dev/null; then
-      exit_code=124
-    fi
-
-    local ended_at
-    ended_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-    complete_cmd_exec "$msg_id" "$msg_source" "$request_id" "$exit_code" "$artifact_dir" "$started_at" "$ended_at"
-
-    log "Reaped nq job: msg=$msg_id exit=$exit_code"
-
-    # Cleanup nq files
-    rm -f "$job_file" "$meta_file"
-  done
-}
-
-# Claim and ingest one queue file into the database
-daemon_ingest_one() {
-  local claimed_file
-  claimed_file=$(daemon_claim_one) || return 1
-
-  if ! ingest_queue_file "$claimed_file" 2>&1; then
-    log "Failed to ingest claimed file: $claimed_file"
-    return 1
-  fi
-}
-
-# Process one pending message: claim, ingest, submit to nq
-# Returns immediately after submitting (nq handles sequential execution)
-daemon_process_one() {
-  local my_identity="$1"
-
-  # Claim and ingest a queue file
-  daemon_ingest_one || return 1
-
-  # Fetch next pending command (excludes already-running jobs)
-  local msg_json
-  msg_json=$(fetch_pending_cmd_exec "$my_identity") || return 0
-
-  # Parse message fields
-  local msg_id cmd cwd request_id source
-  msg_id=$(echo "$msg_json" | jq -r '.msg_id')
-  cmd=$(echo "$msg_json" | jq -r '.cmd')
-  cwd=$(echo "$msg_json" | jq -r '.cwd')
-  request_id=$(echo "$msg_json" | jq -r '.request_id')
-  source=$(echo "$msg_json" | jq -r '.source')
-
-  # Submit to nq for sequential execution
-  nq_submit_job "$msg_id" "$cmd" "$cwd" "${request_id:-$msg_id}" "$source" "$request_id"
-
-  # Mark as running in DB (for fetch_pending_cmd_exec exclusion)
-  local escaped_msg_id
-  escaped_msg_id=$(sql_escape "$msg_id")
-  duckdb "$(msg_db)" "UPDATE messages SET submitted = 1 WHERE message_id = '$escaped_msg_id'"
-
-  return 0
 }
 
 need_flagship() {
@@ -757,16 +448,16 @@ cmd_init() {
   cluster_privkey_b64=$(echo "$flagship_privkey" | base64 | tr -d '\n')
   cluster_pubkey_b64=$(echo "$flagship_pubkey" | base64 | tr -d '\n')
 
-  cat > "$CONFIG_FILE" <<EOF
-{
-  "flagship": "$ssh_dest",
-  "flagship_vm": "$flagship_vm",
-  "cluster_id": "$cluster_id",
-  "cluster_privkey_b64": "$cluster_privkey_b64",
-  "cluster_pubkey_b64": "$cluster_pubkey_b64",
-  "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-EOF
+  jq -n \
+    --arg flagship "$ssh_dest" \
+    --arg flagship_vm "$flagship_vm" \
+    --arg cluster_id "$cluster_id" \
+    --arg privkey "$cluster_privkey_b64" \
+    --arg pubkey "$cluster_pubkey_b64" \
+    --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{flagship: $flagship, flagship_vm: $flagship_vm, cluster_id: $cluster_id,
+      cluster_privkey_b64: $privkey, cluster_pubkey_b64: $pubkey, created_at: $created}' \
+    > "$CONFIG_FILE"
 
   log "Done! Cluster '$cluster_id' ready at: $ssh_dest"
   log "Run 'ohcommodore fleet status' to verify."
@@ -801,10 +492,12 @@ _fleet_status_impl() {
     ship_count=$(echo "$ships_data" | wc -l | tr -d ' ')
 
     echo "SHIPS ($ship_count):"
-    printf "  %-25s %-20s %-35s %s\n" "SHIP" "REPO" "SSH_DEST" "STATUS"
-    echo "$ships_data" | while IFS=',' read -r id repo ssh_dest status; do
-      printf "  %-25s %-20s %-35s %s\n" "$id" "$repo" "$ssh_dest" "$status"
-    done
+    {
+      echo "SHIP	REPO	SSH_DEST	STATUS"
+      echo "$ships_data" | while IFS=',' read -r id repo ssh_dest status; do
+        echo "$id	$repo	$ssh_dest	$status"
+      done
+    } | column -t -s $'\t' | sed 's/^/  /'
   fi
 }
 
@@ -837,6 +530,23 @@ cmd_ship_create() {
   esac
 }
 
+# Database helpers for ship management
+_register_ship() {
+  local ship_id="$1" repo="$2" ssh_dest="$3" status="${4:-creating}"
+  local escaped_id escaped_repo escaped_dest
+  escaped_id=$(sql_escape "$ship_id")
+  escaped_repo=$(sql_escape "$repo")
+  escaped_dest=$(sql_escape "$ssh_dest")
+  duckdb "$(msg_db)" "INSERT INTO ships (id, repo, ssh_dest, status) VALUES ('$escaped_id', '$escaped_repo', '$escaped_dest', '$status');"
+}
+
+_update_ship_status() {
+  local ship_id="$1" status="$2"
+  local escaped_id
+  escaped_id=$(sql_escape "$ship_id")
+  duckdb "$(msg_db)" "UPDATE ships SET status = '$status' WHERE id = '$escaped_id';"
+}
+
 _ship_create_impl() {
   local arg="$1"
   local repo="" name=""
@@ -846,60 +556,49 @@ _ship_create_impl() {
     repo="$arg"
     name="${repo##*/}"
     log "Validating repo '$repo' exists..."
-    if ! gh repo view "$repo" --json nameWithOwner >/dev/null 2>&1; then
-      die "Repository '$repo' not found or not accessible with current token"
-    fi
+    gh repo view "$repo" --json nameWithOwner >/dev/null 2>&1 \
+      || die "Repository '$repo' not found or not accessible with current token"
     log "Repo validated: $repo"
   else
     name="$arg"
     log "Creating empty ship '$name' (no repo)"
   fi
 
-  # Generate unique ship ID
   local ship_id
   ship_id=$(generate_ship_id "$name")
 
-  # Use fleet SSH key (all ships share the same key as flagship)
+  # Get fleet SSH key
   log "Using fleet SSH key..."
-  local cluster_privkey_b64 cluster_pubkey_b64
-  cluster_privkey_b64=$(base64 < ~/.ssh/id_ed25519 | tr -d '\n')
-  cluster_pubkey_b64=$(base64 < ~/.ssh/id_ed25519.pub | tr -d '\n')
+  local privkey_b64 pubkey_b64
+  privkey_b64=$(base64 < ~/.ssh/id_ed25519 | tr -d '\n')
+  pubkey_b64=$(base64 < ~/.ssh/id_ed25519.pub | tr -d '\n')
 
-  # Create VM and get connection info
+  # Create VM
   local vm_output ssh_dest init_env dotfiles_env
   vm_output=$(_create_vm "ship-${ship_id}" --wait-dns)
   ssh_dest=$(echo "$vm_output" | sed -n '1p')
   init_env=$(echo "$vm_output" | sed -n '2p')
   dotfiles_env=$(echo "$vm_output" | sed -n '3p')
 
-  # Register ship in database
-  log "Registering ship in ships table..."
-  local escaped_id escaped_repo escaped_dest
-  escaped_id=$(sql_escape "$ship_id")
-  escaped_repo=$(sql_escape "$repo")
-  escaped_dest=$(sql_escape "$ssh_dest")
+  log "Registering ship..."
+  _register_ship "$ship_id" "$repo" "$ssh_dest"
 
-  duckdb "$(msg_db)" "
-    INSERT INTO ships (id, repo, ssh_dest, status)
-    VALUES ('$escaped_id', '$escaped_repo', '$escaped_dest', 'creating');
-  "
-
-  # Run captain init
+  # Build init environment
   log "Running captain init on ship..."
-  local flagship_hostname flagship_ssh_dest
-  flagship_hostname=$(hostname -f 2>/dev/null || hostname)
-  flagship_ssh_dest="exedev@$flagship_hostname"
+  local flagship_host init_args
+  flagship_host="exedev@$(hostname -f 2>/dev/null || hostname)"
 
-  local gh_token_env=""
-  [[ -n "${GH_TOKEN:-}" && -n "$repo" ]] && gh_token_env="GH_TOKEN=$(printf %q "$GH_TOKEN")"
-  ssh "$ssh_dest" \
-    "$gh_token_env $init_env $dotfiles_env FLAGSHIP_SSH_DEST=$(printf %q "$flagship_ssh_dest") SHIP_ID=$(printf %q "$ship_id") SHIP_SSH_PRIVKEY_B64=$(printf %q "$cluster_privkey_b64") SHIP_SSH_PUBKEY_B64=$(printf %q "$cluster_pubkey_b64") ~/.local/bin/ohcommodore _init_captain $(printf %q "$repo")"
+  init_args="$init_env $dotfiles_env"
+  init_args="$init_args FLAGSHIP_SSH_DEST=$(printf %q "$flagship_host")"
+  init_args="$init_args SHIP_ID=$(printf %q "$ship_id")"
+  init_args="$init_args SHIP_SSH_PRIVKEY_B64=$(printf %q "$privkey_b64")"
+  init_args="$init_args SHIP_SSH_PUBKEY_B64=$(printf %q "$pubkey_b64")"
+  [[ -n "${GH_TOKEN:-}" && -n "$repo" ]] && init_args="GH_TOKEN=$(printf %q "$GH_TOKEN") $init_args"
 
-  # Update ship status to ready
-  log "Updating ship status to ready..."
-  duckdb "$(msg_db)" "
-    UPDATE ships SET status = 'ready' WHERE id = '$escaped_id';
-  "
+  ssh "$ssh_dest" "$init_args ~/.local/bin/ohcommodore _init_captain $(printf %q "$repo")"
+
+  log "Updating ship status..."
+  _update_ship_status "$ship_id" "ready"
 
   log "Created ship: $ship_id"
 }
@@ -925,222 +624,132 @@ cmd_ship_destroy() {
 
 _ship_destroy_impl() {
   local prefix="$1"
-
-  # Resolve prefix to ship ID
   local ship_id
   ship_id=$(resolve_ship_prefix "$prefix")
 
-  local escaped_id
-  escaped_id=$(sql_escape "$ship_id")
-
-  log "Setting status to destroying..."
-  duckdb "$(msg_db)" "UPDATE ships SET status = 'destroying' WHERE id = '$escaped_id'"
-
-  log "Removing VM ship-${ship_id}..."
-  timeout 30 ssh exe.dev rm "ship-${ship_id}" || log "Warning: VM removal timed out or failed"
-
-  log "Removing from ships registry..."
-  duckdb "$(msg_db)" "DELETE FROM ships WHERE id = '$escaped_id'"
+  _update_ship_status "$ship_id" "destroying"
+  _remove_exe_vm "ship-${ship_id}"
+  _delete_ship "$ship_id"
 
   log "Ship '$ship_id' destroyed."
 }
 
-cmd_ship_ssh() {
-  need_flagship
-  local prefix="$1"
-  [[ -n "$prefix" ]] || die "Usage: ohcommodore ship ssh <prefix>"
-
-  local escaped_prefix
-  escaped_prefix=$(sql_like_escape "$prefix")
-
-  # Get matching ships
-  local matches
-  matches=$(flagship_ssh "duckdb ~/.ohcommodore/ns/${OHCOM_NS:-default}/data.duckdb -noheader -csv \"SELECT id, ssh_dest FROM ships WHERE id LIKE '${escaped_prefix}%' ESCAPE '\\'\"" 2>/dev/null)
-
-  local count
-  if [[ -z "$matches" ]]; then
-    count=0
-  else
-    count=$(echo "$matches" | wc -l | tr -d ' ')
-  fi
-
-  case "$count" in
-    0) die "No ship matches '$prefix'" ;;
-    1)
-      local dest
-      dest=$(echo "$matches" | cut -d',' -f2)
-      exec ssh -o StrictHostKeyChecking=accept-new "$dest"
-      ;;
-    *)
-      local ids
-      ids=$(echo "$matches" | cut -d',' -f1 | tr '\n' ' ')
-      die "Multiple ships match '$prefix': $ids"
-      ;;
-  esac
+_delete_ship() {
+  local ship_id="$1"
+  local escaped_id
+  escaped_id=$(sql_escape "$ship_id")
+  duckdb "$(msg_db)" "DELETE FROM ships WHERE id = '$escaped_id';"
 }
 
-cmd_fleet_sink() {
-  local force=false scuttle=false direct=false
-  for arg in "$@"; do
-    case "$arg" in
-      --force) force=true ;;
-      --scuttle) scuttle=true ;;
-      --direct) direct=true ;;
-    esac
-  done
-
-  # --direct mode: bypass flagship, remove VMs directly from exe.dev
-  # Useful for cleaning up orphaned VMs from crashed/failed runs
-  if [[ "$direct" == true ]]; then
-    _fleet_sink_direct "$force" "$scuttle"
-    return
-  fi
+cmd_ship_ssh() {
+  local prefix="$1"
+  [[ -n "$prefix" ]] || die "Usage: ohcommodore ship ssh <prefix>"
 
   case "$(get_role)" in
     local)
       need_flagship
-
-      # Sink ships on flagship (never pass --scuttle to flagship - we handle it locally)
-      local args=""
-      [[ "$force" == true ]] && args="$args --force"
-      flagship_ssh "~/.local/bin/ohcommodore fleet sink $args"
-
-      if [[ "$scuttle" == true ]]; then
-        # Delete flagship VM directly from local (flagship can't delete itself)
-        log "Scuttling flagship from local..."
-        local flagship_vm cluster_pubkey_b64
-        flagship_vm=$(jq -r '.flagship_vm' "$CONFIG_FILE")
-        cluster_pubkey_b64=$(jq -r '.cluster_pubkey_b64 // empty' "$CONFIG_FILE")
-
-        log "Removing VM $flagship_vm..."
-        timeout 30 ssh exe.dev rm "$flagship_vm" || log "Warning: VM removal timed out or failed"
-
-        # Remove fleet SSH key from exe.dev
-        if [[ -n "$cluster_pubkey_b64" ]]; then
-          log "Removing fleet SSH key from exe.dev..."
-          local cluster_pubkey
-          cluster_pubkey=$(echo "$cluster_pubkey_b64" | base64_decode)
-          ssh -n exe.dev ssh-key remove "$cluster_pubkey" 2>/dev/null || log "Warning: Could not remove fleet SSH key"
-        fi
-
-        log "Fleet decommissioned."
-        log "Removing local config..."
-        rm -rf "$CONFIG_DIR"
-      fi
+      # Delegate to flagship's resolver
+      local result
+      result=$(flagship_ssh "~/.local/bin/ohcommodore _ship_resolve $(shell_quote "$prefix")") \
+        || die "No ship matches '$prefix'"
+      exec ssh -o StrictHostKeyChecking=accept-new "$result"
       ;;
     commodore)
-      # On flagship, only sink ships - scuttle is handled by local CLI
-      _fleet_sink_impl "$force" false
+      local dest
+      dest=$(_ship_resolve "$prefix")
+      exec ssh -o StrictHostKeyChecking=accept-new "$dest"
       ;;
     captain)
-      die "Fleet sink not available from ships"
+      die "Cannot SSH to ships from a ship"
       ;;
   esac
 }
 
-# Direct cleanup - bypasses flagship, removes VMs directly from exe.dev
-# Used for cleaning up orphaned VMs when flagship is unreachable or state is corrupted
-_fleet_sink_direct() {
-  local force="$1" scuttle="$2"
+# Internal: resolve ship prefix to ssh_dest (runs on flagship)
+cmd__ship_resolve() {
+  local prefix="$1"
+  [[ -n "$prefix" ]] || die "Usage: _ship_resolve <prefix>"
 
-  log "Direct cleanup mode: bypassing flagship..."
-
-  # Get all ohcommodore VMs from exe.dev
-  local all_vms flagship_vms ship_vms
-  all_vms=$(ssh exe.dev ls 2>/dev/null | grep -oE '(flagship|ship)-[a-zA-Z0-9_-]+' || true)
-  flagship_vms=$(echo "$all_vms" | grep -E '^flagship-' || true)
-  ship_vms=$(echo "$all_vms" | grep -E '^ship-' || true)
-
-  if [[ -z "$all_vms" ]]; then
-    log "No ohcommodore VMs found on exe.dev"
-  else
-    echo "Found VMs to remove:"
-    [[ -n "$ship_vms" ]] && while read -r vm; do printf '  - %s\n' "$vm"; done <<< "$ship_vms"
-    [[ -n "$flagship_vms" && "$scuttle" == true ]] && while read -r vm; do printf '  - %s\n' "$vm"; done <<< "$flagship_vms"
-
-    if [[ "$force" != true ]]; then
-      echo ""
-      printf "Type 'sink' to confirm: "
-      read -r confirm
-      [[ "$confirm" == "sink" ]] || die "Aborted."
-    fi
-
-    # Remove ship VMs
-    if [[ -n "$ship_vms" ]]; then
-      while IFS= read -r vm; do
-        [[ -n "$vm" ]] || continue
-        log "Removing $vm..."
-        ssh -n exe.dev rm "$vm" 2>/dev/null || log "Warning: Failed to remove $vm"
-      done <<< "$ship_vms"
-    fi
-
-    # Remove flagship VMs if --scuttle
-    if [[ "$scuttle" == true && -n "$flagship_vms" ]]; then
-      while IFS= read -r vm; do
-        [[ -n "$vm" ]] || continue
-        log "Scuttling $vm..."
-        ssh -n exe.dev rm "$vm" 2>/dev/null || log "Warning: Failed to remove $vm"
-      done <<< "$flagship_vms"
-    fi
-  fi
-
-  # Remove local config
-  if [[ -d "$CONFIG_DIR" ]]; then
-    log "Removing local config..."
-    rm -rf "$CONFIG_DIR"
-  fi
-
-  log "Direct cleanup complete."
+  local ship_id ssh_dest
+  ship_id=$(resolve_ship_prefix "$prefix")
+  ssh_dest=$(lookup_ship_ssh_dest "$ship_id") || die "Ship '$ship_id' has no ssh_dest"
+  echo "$ssh_dest"
 }
 
-_fleet_sink_impl() {
+_ship_resolve() {
+  cmd__ship_resolve "$@"
+}
+
+# Shared helpers for fleet sink
+_confirm_sink() {
   local force="$1"
-  # Note: scuttle is handled by local CLI, not here
+  [[ "$force" == true ]] && return 0
+  echo ""
+  printf "Type 'sink' to confirm: "
+  read -r confirm
+  [[ "$confirm" == "sink" ]] || die "Aborted."
+}
 
-  local ships_data
-  ships_data=$(duckdb "$(msg_db)" -noheader -csv "SELECT id, repo FROM ships" 2>/dev/null || echo "")
+_remove_exe_vm() {
+  local vm="$1" label="${2:-Removing}"
+  log "$label $vm..."
+  timeout 30 ssh -n exe.dev rm "$vm" 2>/dev/null || log "Warning: Failed to remove $vm"
+}
 
-  if [[ -z "$ships_data" ]]; then
-    echo "No ships to sink."
+cmd_fleet_sink() {
+  local force=false scuttle=false
+  for arg in "$@"; do
+    case "$arg" in
+      --force) force=true ;;
+      --scuttle) scuttle=true ;;
+    esac
+  done
+
+  _fleet_sink_direct "$force" "$scuttle"
+}
+
+_fleet_sink_direct() {
+  local force="$1" scuttle="$2"
+  log "Direct cleanup mode: bypassing flagship..."
+
+  local all_vms ship_vms flagship_vms
+  all_vms=$(ssh exe.dev ls 2>/dev/null | grep -oE '(flagship|ship)-[a-zA-Z0-9_-]+' || true)
+  ship_vms=$(echo "$all_vms" | grep -E '^ship-' || true)
+  flagship_vms=$(echo "$all_vms" | grep -E '^flagship-' || true)
+
+  if [[ -z "$ship_vms" && ( -z "$flagship_vms" || "$scuttle" != true ) ]]; then
+    log "No ohcommodore VMs to remove"
   else
-    echo "WARNING: This will destroy all ships:"
-    echo "$ships_data" | while IFS=',' read -r id repo; do
-      echo "  - $id ($repo)"
-    done
+    echo "VMs to remove:"
+    [[ -n "$ship_vms" ]] && echo "$ship_vms" | while read -r vm; do [[ -n "$vm" ]] && echo "  - $vm"; done
+    [[ -n "$flagship_vms" && "$scuttle" == true ]] && echo "$flagship_vms" | while read -r vm; do [[ -n "$vm" ]] && echo "  - $vm"; done
 
-    if [[ "$force" != true ]]; then
-      echo ""
-      printf "Type 'sink' to confirm: "
-      read -r confirm
-      [[ "$confirm" == "sink" ]] || die "Aborted."
-    fi
+    _confirm_sink "$force"
 
-    while IFS=',' read -r id _repo; do
-      log "Sinking $id..."
-      _ship_destroy_impl "$id" >/dev/null
-    done <<< "$ships_data"
-    log "Fleet sunk."
+    [[ -n "$ship_vms" ]] && echo "$ship_vms" | while read -r vm; do [[ -n "$vm" ]] && _remove_exe_vm "$vm"; done
+    [[ -n "$flagship_vms" && "$scuttle" == true ]] && echo "$flagship_vms" | while read -r vm; do [[ -n "$vm" ]] && _remove_exe_vm "$vm" "Scuttling"; done
   fi
 
-  echo "Flagship still running."
+  [[ -d "$CONFIG_DIR" ]] && { log "Removing local config..."; rm -rf "$CONFIG_DIR"; }
+  log "Direct cleanup complete."
 }
 
 init_common() {
   local identity="$1"
-  local db
+  local db maildir
   db="$(msg_db)"
+  maildir=$(maildir_for_identity "$identity")
 
-  queue_init_dirs
+  # Create Maildir structure
+  ensure_maildir "$maildir"
+
+  # Initialize config database
   init_messages_db
 
   local escaped_identity
   escaped_identity=$(sql_escape "$identity")
 
   duckdb "$db" "
-    CREATE TABLE IF NOT EXISTS config (
-      key TEXT PRIMARY KEY,
-      value TEXT
-    );
     INSERT INTO config (key, value) VALUES ('POLL_INTERVAL_SEC', '10')
       ON CONFLICT (key) DO NOTHING;
     INSERT INTO config (key, value) VALUES ('IDENTITY', '$escaped_identity')
@@ -1151,9 +760,7 @@ init_common() {
 cmd__init_commodore() {
   log "Initializing commodore identity..."
   mkdir -p "$CONFIG_DIR"
-  cat > "$CONFIG_DIR/identity.json" <<'EOF'
-{"role":"commodore"}
-EOF
+  jq -n '{role: "commodore"}' > "$CONFIG_DIR/identity.json"
 
   run_init_script commodore
 
@@ -1161,7 +768,7 @@ EOF
   local flagship_hostname
   flagship_hostname=$(hostname -f 2>/dev/null || hostname)
 
-  # Create common config and v2 queue state
+  # Create common config and email messaging state
   init_common "commodore@$flagship_hostname"
 
   # Create ships table (commodore-only)
@@ -1183,16 +790,10 @@ cmd__init_captain() {
 
   log "Initializing captain identity..."
   mkdir -p "$CONFIG_DIR"
-  cat > "$CONFIG_DIR/identity.json" <<EOF
-{"role":"captain"}
-EOF
+  jq -n '{role: "captain"}' > "$CONFIG_DIR/identity.json"
 
   if [[ -n "${FLAGSHIP_SSH_DEST:-}" ]]; then
-    cat > "$CONFIG_FILE" <<EOF
-{
-  "flagship": "$FLAGSHIP_SSH_DEST"
-}
-EOF
+    jq -n --arg flagship "$FLAGSHIP_SSH_DEST" '{flagship: $flagship}' > "$CONFIG_FILE"
   fi
 
   run_init_script captain \
@@ -1209,7 +810,7 @@ EOF
     ship_identity="captain@$(hostname -f 2>/dev/null || hostname)"
   fi
 
-  # Create common config and v2 queue state
+  # Create common config and email messaging state
   init_common "$ship_identity"
 
   log "Captain initialized${repo:+ for $repo}."
@@ -1231,35 +832,66 @@ cmd_inbox() {
 }
 
 _inbox_list() {
-  local status_filter=""
-  if [[ "${1:-}" == "--status" && -n "${2:-}" ]]; then
-    case "$2" in
-      unread|pending)
-        status_filter="WHERE handled_at IS NULL"
-        ;;
-      done|handled)
-        status_filter="WHERE handled_at IS NOT NULL"
-        ;;
-      *)
-        die "Invalid status '$2'. Use: unread, pending, done, handled"
-        ;;
+  local status_filter="all" for_identity=""
+
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --status) status_filter="${2:-}"; shift 2 ;;
+      --for-identity) for_identity="${2:-}"; shift 2 ;;  # Internal: used for delegation
+      *) shift ;;
     esac
+  done
+
+  # Validate status_filter
+  case "$status_filter" in
+    all|done|handled|unread|pending) ;;
+    *) die "Invalid status filter: $status_filter" ;;
+  esac
+
+  # Ships delegate to flagship (where Maildir lives)
+  if maildir_is_remote; then
+    local my_identity args=""
+    my_identity=$(_inbox_identity)
+    [[ "$status_filter" != "all" ]] && args="--status $(shell_quote "$status_filter")"
+    args="$args --for-identity $(shell_quote "$my_identity")"
+    flagship_ssh "~/.local/bin/ohcommodore inbox list $args"
+    return
   fi
 
-  [[ -f "$(msg_db)" ]] || die "Messages DB not initialized"
-  duckdb "$(msg_db)" -box "
-    SELECT
-      message_id as id,
-      CASE WHEN handled_at IS NULL THEN 'unread' ELSE 'done' END as status,
-      source as sender,
-      dest as recipient,
-      topic,
-      substr(payload_json, 1, 50) as payload_preview,
-      created_at
-    FROM messages
-    $status_filter
-    ORDER BY created_at DESC
-  "
+  # Local: use for_identity if provided (delegation), otherwise own identity
+  local my_identity maildir
+  my_identity="${for_identity:-$(_inbox_identity)}"
+  [[ -n "$my_identity" ]] || die "Cannot determine identity"
+  maildir=$(maildir_for_identity "$my_identity")
+
+  {
+    echo "STATUS	ID	FROM	TOPIC	DATE"
+    local dir status
+    for dir in "$maildir/new" "$maildir/cur"; do
+      [[ -d "$dir" ]] || continue
+
+      if [[ "$dir" == */new ]]; then
+        status="unread"
+        [[ "$status_filter" == "done" || "$status_filter" == "handled" ]] && continue
+      else
+        status="done"
+        [[ "$status_filter" == "unread" || "$status_filter" == "pending" ]] && continue
+      fi
+
+      for msg in "$dir"/*; do
+        [[ -f "$msg" ]] || continue
+
+        local msg_id from topic date_hdr
+        msg_id=$(email_get_header "$msg" "Message-ID" | tr -d '<>' | cut -c1-38)
+        from=$(email_get_header "$msg" "From" | cut -c1-25)
+        topic=$(email_get_header "$msg" "X-Ohcom-Topic")
+        date_hdr=$(email_get_header "$msg" "Date" | cut -c1-20)
+
+        echo "$status	$msg_id	$from	$topic	$date_hdr"
+      done
+    done
+  } | column -t -s $'\t'
 }
 
 _inbox_send() {
@@ -1271,135 +903,218 @@ _inbox_send() {
     die "Invalid recipient format. Use captain@<ship-id> or commodore@<hostname>"
   fi
 
-  local role="${recipient%%@*}"
-  local target="${recipient#*@}"
-  local dest_ssh
-
-  if [[ "$role" == "captain" ]]; then
-    # Look up ship ssh_dest from central registry
-    dest_ssh=$(lookup_ship_ssh_dest "$target" || true)
-    [[ -n "$dest_ssh" ]] || die "Ship '$target' not found in registry"
-  else
-    # Commodore - target is hostname
-    dest_ssh="exedev@$target"
-  fi
-
-  local request_id
+  local my_identity request_id
+  my_identity=$(_inbox_identity)
+  [[ -n "$my_identity" ]] || die "Cannot determine identity"
   request_id=$(uuid_gen)
 
-  # Build cmd.exec payload
-  local payload_json
-  payload_json=$(jq -n \
-    --arg request_id "$request_id" \
-    --arg cmd "$command" \
-    '{
-      request_id: $request_id,
-      cmd: $cmd,
-      cwd: "~",
-      env: {},
-      timeout_s: 1800
-    }')
+  local msg_id
+  msg_id=$(send_email \
+    "$my_identity" \
+    "$recipient" \
+    "cmd.exec" \
+    "$command" \
+    "X-Ohcom-Topic: cmd.exec" \
+    "X-Ohcom-Request-ID: $request_id")
 
-  # Write message file
-  local msg_path
-  msg_path=$(write_msg_file "cmd.exec" "$recipient" "$payload_json")
-
-  # Deliver via SCP
-  if deliver_msg_file "$msg_path" "$dest_ssh"; then
-    echo "Message sent: $request_id -> $recipient"
-  else
-    die "Failed to send message to $recipient"
-  fi
+  echo "Message sent: $request_id -> $recipient"
 }
 
 _inbox_read() {
-  [[ $# -ge 1 ]] || die "Usage: ohcommodore inbox read <id>"
-  local msg_id="$1"
-  local escaped_id
-  escaped_id=$(sql_escape "$msg_id")
+  local msg_prefix="" for_identity=""
 
-  [[ -f "$(msg_db)" ]] || die "Messages DB not initialized"
-  duckdb "$(msg_db)" "UPDATE messages SET handled_at = current_timestamp WHERE message_id = '$escaped_id' AND handled_at IS NULL"
-  duckdb "$(msg_db)" -json "SELECT * FROM messages WHERE message_id = '$escaped_id'"
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --for-identity) for_identity="${2:-}"; shift 2 ;;  # Internal: used for delegation
+      *) msg_prefix="$1"; shift ;;
+    esac
+  done
+
+  [[ -n "$msg_prefix" ]] || die "Usage: ohcommodore inbox read <message-id-prefix>"
+
+  # Ships delegate to flagship (where Maildir lives)
+  if maildir_is_remote; then
+    local my_identity
+    my_identity=$(_inbox_identity)
+    flagship_ssh "~/.local/bin/ohcommodore inbox read $(shell_quote "$msg_prefix") --for-identity $(shell_quote "$my_identity")"
+    return
+  fi
+
+  # Local: use for_identity if provided (delegation), otherwise own identity
+  local my_identity maildir
+  my_identity="${for_identity:-$(_inbox_identity)}"
+  [[ -n "$my_identity" ]] || die "Cannot determine identity"
+  maildir=$(maildir_for_identity "$my_identity")
+
+  # Find message matching prefix
+  local found=""
+  for dir in "$maildir/new" "$maildir/cur"; do
+    [[ -d "$dir" ]] || continue
+    for msg in "$dir"/*; do
+      [[ -f "$msg" ]] || continue
+      local msg_id
+      msg_id=$(email_get_header "$msg" "Message-ID")
+      if [[ "$msg_id" == *"$msg_prefix"* ]]; then
+        found="$msg"
+        break 2
+      fi
+    done
+  done
+
+  [[ -n "$found" ]] || die "No message found matching '$msg_prefix'"
+
+  # If in new/, move to cur/ (mark as read)
+  if [[ "$found" == */new/* ]]; then
+    local filename
+    filename=$(basename "$found")
+    mv "$found" "$maildir/cur/${filename}:2,S"
+    found="$maildir/cur/${filename}:2,S"
+  fi
+
+  # Output message content
+  cat "$found"
 }
 
 _inbox_identity() {
-  duckdb "$(msg_db)" -noheader -csv "SELECT value FROM config WHERE key = 'IDENTITY'" 2>/dev/null
+  local identity
+  identity=$(duckdb "$(msg_db)" -noheader -csv "SELECT value FROM config WHERE key = 'IDENTITY'" 2>/dev/null)
+
+  # Ensure we have a valid email-style identity
+  if [[ -z "$identity" ]]; then
+    local role hostname
+    role=$(get_role)
+    hostname=$(hostname -f 2>/dev/null || hostname)
+    identity="${role}@${hostname}"
+  fi
+
+  echo "$identity"
 }
 
 cmd__scheduler() {
   require_role commodore captain
 
-  # Initialize v2 queue system
-  queue_init_dirs
-  init_messages_db
+  local my_identity maildir poll_interval is_remote
+  my_identity=$(_inbox_identity)
+  [[ -n "$my_identity" ]] || die "No identity configured"
+  maildir=$(maildir_for_identity "$my_identity")
+  ensure_maildir "$maildir"
 
-  local poll_interval
+  is_remote="no"
+  maildir_is_remote && is_remote="yes"
+
   poll_interval=$(duckdb "$(msg_db)" -noheader -csv "SELECT value FROM config WHERE key = 'POLL_INTERVAL_SEC'" 2>/dev/null || echo "10")
-  local identity
-  identity=$(_inbox_identity)
-  [[ -n "$identity" ]] || die "No IDENTITY in config"
 
-  # Set up graceful shutdown
-  trap 'daemon_shutdown_handler' SIGTERM SIGINT
+  trap 'log "Scheduler shutting down"; exit 0' SIGTERM SIGINT
 
-  log "v2 Scheduler starting for $identity (poll: ${poll_interval}s, timeout: ${CMD_TIMEOUT_S}s, queue: nq)"
+  log "Email scheduler starting for $my_identity (poll: ${poll_interval}s, maildir: $maildir, remote: $is_remote)"
 
-  # Recover any abandoned claims from previous crash
-  daemon_recover_claimed
+  while true; do
+    # Process new mail (uses remote helpers if captain)
+    local new_files
+    new_files=$(maildir_list_new "$maildir")
 
-  # Note: nq handles orphan recovery via flock - no action needed on restart
+    while IFS= read -r msg; do
+      # Skip empty lines and error messages from ls
+      [[ -n "$msg" ]] || continue
+      [[ "$msg" != *"No such file"* && "$msg" != *"cannot access"* ]] || continue
 
-  while [[ $DAEMON_SHUTDOWN -eq 0 ]]; do
-    # Check nq jobs for completion
-    nq_check_jobs
+      local topic claimed_msg
+      # Claim message (moves to cur/, copies locally if remote)
+      if ! claimed_msg=$(maildir_claim "$msg" "$maildir"); then
+        log "Failed to claim message: $msg"
+        continue
+      fi
+      [[ -f "$claimed_msg" ]] || continue
 
-    # Process all pending messages (submits to nq for sequential execution)
-    while daemon_process_one "$identity"; do
-      [[ $DAEMON_SHUTDOWN -eq 0 ]] || break
-    done
+      topic=$(email_get_header "$claimed_msg" "X-Ohcom-Topic")
 
-    # Send any pending outbound messages
-    local outbound_dir result_file dest dest_role dest_target dest_ssh
-    outbound_dir="$(q_root)/outbound"
-    if [[ -d "$outbound_dir" ]]; then
-      for result_file in "$outbound_dir"/*.json; do
-        [[ -f "$result_file" ]] || continue
-        dest=$(jq -r '.dest' "$result_file")
-        if [[ "$dest" != *@* ]]; then
-          log "Warning: Invalid dest '$dest' in $result_file"
-          continue
-        fi
-        dest_role="${dest%%@*}"
-        dest_target="${dest#*@}"
-
-        case "$dest_role" in
-          captain)
-            dest_ssh=$(lookup_ship_ssh_dest "$dest_target" || true)
-            if [[ -z "$dest_ssh" ]]; then
-              log "Warning: Ship '$dest_target' not found in registry"
-              continue
-            fi
-            ;;
-          commodore)
-            dest_ssh="exedev@$dest_target"
-            ;;
-          *)
-            log "Warning: Unknown dest role '$dest_role' in $result_file"
-            continue
-            ;;
-        esac
-
-        deliver_msg_file "$result_file" "$dest_ssh" 3 || {
-          log "Warning: Failed to deliver result to $dest_target (see errors above)"
-        }
-      done
-    fi
+      case "$topic" in
+        cmd.exec)
+          _scheduler_handle_cmd_exec "$claimed_msg"
+          ;;
+        cmd.result)
+          _scheduler_handle_cmd_result "$claimed_msg"
+          ;;
+        "")
+          log "Missing X-Ohcom-Topic header in message, skipping: $claimed_msg"
+          ;;
+        *)
+          log "Unknown topic '$topic' in message, skipping: $claimed_msg"
+          ;;
+      esac
+    done <<< "$new_files"
 
     sleep "$poll_interval"
   done
+}
 
-  log "Scheduler shutting down gracefully"
+_scheduler_handle_cmd_exec() {
+  local msg="$1"
+
+  local cmd request_id source started_at ended_at exit_code
+  cmd=$(email_get_body "$msg")
+  request_id=$(email_get_header "$msg" "X-Ohcom-Request-ID")
+  source=$(email_get_header "$msg" "From")
+
+  [[ -n "$cmd" ]] || { log "Empty command in message, skipping"; return; }
+
+  log "Executing: $cmd"
+  started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  # Create artifact directory for output
+  local artifact_dir
+  artifact_dir="$(artifacts_root)/${request_id:-$(uuid_gen)}"
+  mkdir -p "$artifact_dir"
+
+  # Execute command with timeout, capture output
+  set +e
+  timeout "$CMD_TIMEOUT_S" bash -c "$cmd" > "$artifact_dir/stdout.txt" 2> "$artifact_dir/stderr.txt"
+  exit_code=$?
+  set -e
+
+  ended_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  log "Command finished: exit=$exit_code"
+
+  # Send result back to source
+  if [[ -n "$source" ]]; then
+    local my_identity hostname body
+    my_identity=$(_inbox_identity)
+    hostname=$(hostname -f 2>/dev/null || hostname)
+
+    body=$(cat << RESULT_EOF
+Exit code: $exit_code
+Started: $started_at
+Ended: $ended_at
+
+--stdout--
+${hostname}:${artifact_dir}/stdout.txt
+
+--stderr--
+${hostname}:${artifact_dir}/stderr.txt
+RESULT_EOF
+)
+
+    send_reply "$msg" "$my_identity" "Re: cmd.exec" "$body" \
+      "X-Ohcom-Topic: cmd.result" \
+      "X-Ohcom-Request-ID: ${request_id:-unknown}" \
+      "X-Ohcom-Exit-Code: $exit_code"
+
+    log "Result sent to $source"
+  fi
+}
+
+_scheduler_handle_cmd_result() {
+  local msg="$1"
+
+  local request_id exit_code from
+  request_id=$(email_get_header "$msg" "X-Ohcom-Request-ID")
+  exit_code=$(email_get_header "$msg" "X-Ohcom-Exit-Code")
+  from=$(email_get_header "$msg" "From")
+
+  log "Received result: request=$request_id exit=$exit_code from=$from"
+  # Results are stored in Maildir for later inspection
 }
 
 show_help() {
@@ -1409,9 +1124,8 @@ ohcommodore - lightweight multi-agent control plane
 USAGE:
   ohcommodore init                         Bootstrap flagship VM
   ohcommodore fleet status                 Show fleet status
-  ohcommodore fleet sink [--force] [--scuttle] [--direct]  Destroy ships
+  ohcommodore fleet sink [--force] [--scuttle]  Destroy ships
     --scuttle  Also destroy flagship
-    --direct   Bypass flagship, remove VMs directly from exe.dev (for orphan cleanup)
   ohcommodore ship create <owner/repo|name> Create ship (repo or empty)
   ohcommodore ship destroy <name>          Destroy a ship
   ohcommodore ship ssh <name>              SSH into a ship
@@ -1442,6 +1156,7 @@ case "${1:-help}" in
   inbox) shift; cmd_inbox "$@" ;;
   _init_commodore) cmd__init_commodore ;;
   _init_captain) cmd__init_captain "${2:-}" ;;
+  _ship_resolve) cmd__ship_resolve "${2:-}" ;;
   _scheduler) cmd__scheduler ;;
   *) die "Unknown command: $1. Run 'ohcommodore help' for usage." ;;
 esac

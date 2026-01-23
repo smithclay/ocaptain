@@ -138,15 +138,53 @@ else
   log "DuckDB already installed — skipping"
 fi
 
-log "Installing nq (job queue utility)..."
-if ! need_cmd nq; then
-  git clone --depth 1 https://github.com/leahneukirchen/nq /tmp/nq || die "Failed to clone nq repository"
-  cd /tmp/nq || die "Failed to cd to nq directory"
-  make || die "Failed to build nq"
-  sudo make install PREFIX=/usr/local || die "Failed to install nq"
-  rm -rf /tmp/nq
-else
-  log "nq already installed — skipping"
+# ──────────────────────────────────────────────────────────
+# Email infrastructure (commodore only)
+# ──────────────────────────────────────────────────────────
+
+if [[ "${ROLE:-}" == "commodore" ]]; then
+  log "Installing OpenSMTPD..."
+  if ! need_cmd smtpd; then
+    sudo apt-get update -qq
+    sudo apt-get install -y opensmtpd
+  fi
+
+  log "Configuring OpenSMTPD for local Maildir delivery..."
+
+  # Create mail config directory
+  sudo mkdir -p /etc/mail
+
+  # Domain table - accept any domain (ships have dynamic domains)
+  echo "*" | sudo tee /etc/mail/domains > /dev/null
+
+  # Virtual users table - map any user to exedev
+  echo "@: exedev" | sudo tee /etc/mail/virtuals > /dev/null
+
+  sudo tee /etc/smtpd.conf > /dev/null << 'SMTPD_CONF'
+# ohcommodore mail configuration
+# Listen only on localhost (ships tunnel in via SSH)
+listen on lo
+
+# Accept any domain (ship domains are dynamic)
+table domains file:/etc/mail/domains
+
+# Map any user at any domain to local exedev user
+table virtuals file:/etc/mail/virtuals
+
+# Deliver to Maildir organized by recipient domain
+# Identity format: role@ship-id (e.g., captain@ohcommodore-abc123)
+# Maildir path: ~/Maildir/ship-id/
+action "deliver" maildir "/home/exedev/Maildir/%{dest.domain}" virtual <virtuals>
+
+# Accept all mail from local for any domain
+match from local for domain <domains> action "deliver"
+SMTPD_CONF
+
+  log "Creating base Maildir structure..."
+  mkdir -p ~/Maildir/commodore/{new,cur,tmp}
+
+  log "Starting OpenSMTPD..."
+  sudo systemctl enable --now opensmtpd
 fi
 
 log "Setting up SSH keys..."
@@ -192,6 +230,63 @@ Host *.exe.xyz
   User exedev
 SSHCONFIG
   chmod 600 ~/.ssh/config
+fi
+
+# ──────────────────────────────────────────────────────────
+# Email infrastructure (captain/ships only)
+# ──────────────────────────────────────────────────────────
+
+if [[ "${ROLE:-}" == "captain" && -n "${FLAGSHIP_SSH_DEST:-}" ]]; then
+  log "Installing autossh and msmtp for SMTP tunnel..."
+  if ! need_cmd autossh || ! need_cmd msmtp; then
+    sudo apt-get update -qq
+    sudo apt-get install -y autossh msmtp msmtp-mta
+  fi
+
+  log "Adding flagship to /etc/hosts..."
+  if ! grep -q '^127\.0\.0\.1.*flagship' /etc/hosts; then
+    echo "127.0.0.1 flagship" | sudo tee -a /etc/hosts > /dev/null
+  fi
+
+  log "Configuring msmtp for local SMTP relay..."
+  cat > ~/.msmtprc << 'MSMTP_CONF'
+# msmtp config for ohcommodore ships
+# Sends mail via local SMTP tunnel (autossh -> flagship:25)
+defaults
+auth off
+tls off
+
+account flagship
+host 127.0.0.1
+port 25
+from exedev@localhost
+
+account default : flagship
+MSMTP_CONF
+  chmod 600 ~/.msmtprc
+
+  log "Creating Maildir for ship identity..."
+  mkdir -p ~/Maildir/"${SHIP_ID:-captain}"/{new,cur,tmp}
+
+  log "Creating autossh tunnel service..."
+  sudo tee /etc/systemd/system/ohcom-tunnel.service > /dev/null << TUNNEL_EOF
+[Unit]
+Description=ohcommodore SMTP tunnel to flagship
+After=network.target
+
+[Service]
+User=exedev
+ExecStart=/usr/bin/autossh -M 0 -N -o "ServerAliveInterval 30" -o "ServerAliveCountMax 3" -L 25:localhost:25 ${FLAGSHIP_SSH_DEST}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+TUNNEL_EOF
+
+  log "Starting SMTP tunnel..."
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now ohcom-tunnel
 fi
 
 log "Setting up ship directories..."

@@ -341,4 +341,8 @@ done
 # Clear from systemd user environment
 systemctl --user unset-environment GH_TOKEN SHIP_SSH_PRIVKEY_B64 SHIP_SSH_PUBKEY_B64 2>/dev/null || true
 
+# Configure Claude Code to skip onboarding
+log "Configuring Claude Code..."
+echo '{"hasCompletedOnboarding":true}' > ~/.claude.json
+
 log "Init complete. Repo: ${TARGET_REPO:-none}"

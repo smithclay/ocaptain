@@ -2,3 +2,19 @@
 if [[ -d "$HOME/.local/bin" ]]; then
   path=("$HOME/.local/bin" $path)
 fi
+
+# Claude alias - fetches OAuth token from flagship
+claude() {
+  local flagship token
+  if [[ -f "$HOME/.ohcommodore/config.json" ]]; then
+    flagship=$(jq -r '.flagship // empty' "$HOME/.ohcommodore/config.json" 2>/dev/null)
+  fi
+  if [[ -n "$flagship" ]]; then
+    token=$(ssh "$flagship" 'sudo cat /etc/ohcommodore/claude_token 2>/dev/null' 2>/dev/null)
+  fi
+  if [[ -n "$token" ]]; then
+    CLAUDE_CODE_OAUTH_TOKEN="$token" command claude "$@"
+  else
+    command claude "$@"
+  fi
+}

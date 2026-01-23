@@ -15,18 +15,22 @@ brew install smithclay/tap/ohcommodore
 ## Quick Start
 
 ```bash
+# Add optional Github and Claude credentials to .env: 
+# 1) Create a long-lived Claude Code token to use it in your VMs: `claude setup-token`
+# 2) Create a Github PAT at github.com/settings/personal-access-tokens
+cp .env.example .env
+
 # Bootstrap the flagship
 ohcommodore init
 
 # Check fleet status
 ohcommodore fleet status
 
-# Create a ship
-# GH_TOKEN should be a fine-grained access token scoped to the repo
-# Create a token at github.com/settings/personal-access-tokens
-# You can pass via the command line or put in .env
-# Don't want to check out code? Just pass a ship name without a "/"
-GH_TOKEN=... ohcommodore ship create owner/repo
+# Create an empty ship
+ohcommodore ship ahoy-hoy
+
+# Create a ship with a Git repo (requires PAT)
+ohcommodore ship create owner/repo
 
 # SSH into a ship
 ohcommodore ship ssh reponame

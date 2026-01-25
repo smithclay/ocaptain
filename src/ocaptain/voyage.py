@@ -54,7 +54,9 @@ class Voyage:
         return f"{self.id}-ship{index}"
 
 
-def sail(prompt: str, repo: str, ships: int | None = None) -> Voyage:
+def sail(
+    prompt: str, repo: str, ships: int | None = None, tokens: dict[str, str] | None = None
+) -> Voyage:
     """
     Launch a new voyage.
 
@@ -62,7 +64,15 @@ def sail(prompt: str, repo: str, ships: int | None = None) -> Voyage:
     2. Initialize voyage directory structure
     3. Clone repository
     4. Bootstrap ship VMs in parallel
+
+    Args:
+        prompt: The objective for the voyage
+        repo: GitHub repository in "owner/repo" format
+        ships: Number of ship VMs to provision
+        tokens: Dict with CLAUDE_CODE_OAUTH_TOKEN (required) and optionally GH_TOKEN
     """
+    if tokens is None:
+        tokens = {}
     ships = ships or CONFIG.default_ships
     voyage = Voyage.create(prompt, repo, ships)
     provider = get_provider()
@@ -109,7 +119,7 @@ def sail(prompt: str, repo: str, ships: int | None = None) -> Voyage:
     failed_ships: list[tuple[int, Exception]] = []
     for i in range(ships):
         try:
-            bootstrap_ship(voyage, storage, i)
+            bootstrap_ship(voyage, storage, i, tokens)
         except Exception as e:
             logger.warning("Ship-%d bootstrap failed: %s", i, e)
             failed_ships.append((i, e))

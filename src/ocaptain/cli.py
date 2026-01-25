@@ -11,6 +11,7 @@ from . import logs as logs_mod
 from . import tasks as tasks_mod
 from . import voyage as voyage_mod
 from .provider import get_provider
+from .secrets import load_tokens, validate_repo_access
 
 app = typer.Typer(
     name="ocaptain",
@@ -27,9 +28,23 @@ def sail(
     ships: int = typer.Option(3, "--ships", "-n", help="Number of ships to provision"),
 ) -> None:
     """Launch a new voyage."""
+    # Load and validate tokens before provisioning
+    try:
+        tokens = load_tokens()
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+    # Validate repository access before provisioning VMs
+    with console.status("Validating repository access..."):
+        try:
+            validate_repo_access(repo, tokens.get("GH_TOKEN"))
+        except ValueError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            raise typer.Exit(1) from None
 
     with console.status(f"Launching voyage with {ships} ships..."):
-        voyage = voyage_mod.sail(prompt, repo, ships)
+        voyage = voyage_mod.sail(prompt, repo, ships, tokens)
 
     console.print(f"\n[green]✓[/green] Voyage [bold]{voyage.id}[/bold] launched")
     console.print(f"  Repo: {voyage.repo}")
@@ -196,6 +211,12 @@ def resume(
     ships: int = typer.Option(1, "--ships", "-n", help="Number of ships to add"),
 ) -> None:
     """Add ships to an incomplete voyage."""
+    # Load tokens before provisioning
+    try:
+        tokens = load_tokens()
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
 
     voyage, storage = voyage_mod.load_voyage(voyage_id)
     voyage_status = tasks_mod.derive_status(voyage, storage)
@@ -206,7 +227,7 @@ def resume(
 
     from .ship import add_ships
 
-    new_ships = add_ships(voyage, storage, ships, start_index)
+    new_ships = add_ships(voyage, storage, ships, start_index, tokens)
 
     console.print(f"[green]✓[/green] Added {len(new_ships)} ships to voyage.")
 

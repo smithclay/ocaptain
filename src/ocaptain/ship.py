@@ -1,6 +1,7 @@
 """Ship VM provisioning and bootstrap."""
 
 import json
+import shlex
 from io import BytesIO
 
 from fabric import Connection
@@ -9,7 +10,9 @@ from .provider import VM, get_provider
 from .voyage import Voyage
 
 
-def bootstrap_ship(voyage: Voyage, storage: VM, index: int) -> VM:
+def bootstrap_ship(
+    voyage: Voyage, storage: VM, index: int, tokens: dict[str, str] | None = None
+) -> VM:
     """
     Bootstrap a single ship VM.
 
@@ -17,9 +20,18 @@ def bootstrap_ship(voyage: Voyage, storage: VM, index: int) -> VM:
     2. Mount shared storage via SSHFS
     3. Write ship identity
     4. Install stop hook
-    5. Configure Claude Code
-    6. Start Claude Code
+    5. Configure Claude Code (with secure token injection)
+    6. Authenticate GitHub CLI (if GH_TOKEN provided)
+    7. Start Claude Code
+
+    Args:
+        voyage: The voyage configuration
+        storage: The storage VM to mount
+        index: Ship index number
+        tokens: Dict with CLAUDE_CODE_OAUTH_TOKEN and optionally GH_TOKEN
     """
+    if tokens is None:
+        tokens = {}
     provider = get_provider()
     ship_id = f"ship-{index}"
     ship_name = voyage.ship_name(index)
@@ -55,10 +67,15 @@ def bootstrap_ship(voyage: Voyage, storage: VM, index: int) -> VM:
         # 5. Configure Claude Code
         c.run("mkdir -p ~/.claude")
 
+        env_settings: dict[str, str] = {
+            "CLAUDE_CODE_TASK_LIST_ID": voyage.task_list_id,
+        }
+        # Inject Claude Code OAuth token if available
+        if oauth_token := tokens.get("CLAUDE_CODE_OAUTH_TOKEN"):
+            env_settings["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
+
         settings = {
-            "env": {
-                "CLAUDE_CODE_TASK_LIST_ID": voyage.task_list_id,
-            },
+            "env": env_settings,
             "hooks": {
                 "Stop": [
                     {
@@ -74,8 +91,14 @@ def bootstrap_ship(voyage: Voyage, storage: VM, index: int) -> VM:
             },
         }
         c.put(BytesIO(json.dumps(settings, indent=2).encode()), f"{home}/.claude/settings.json")
+        # Secure the settings file (contains sensitive tokens)
+        c.run(f"chmod 600 {home}/.claude/settings.json")
 
-        # 6. Start Claude Code (detached)
+        # 6. Authenticate GitHub CLI (if GH_TOKEN provided, for git push)
+        if gh_token := tokens.get("GH_TOKEN"):
+            c.run(f"echo {shlex.quote(gh_token)} | gh auth login --with-token", hide=True)
+
+        # 7. Start Claude Code (detached)
         c.run(
             f"nohup claude --prompt-file ~/voyage/prompt.md &> ~/voyage/logs/{ship_id}.log &",
             disown=True,
@@ -84,7 +107,13 @@ def bootstrap_ship(voyage: Voyage, storage: VM, index: int) -> VM:
     return ship
 
 
-def add_ships(voyage: Voyage, storage: VM, count: int, start_index: int) -> list[VM]:
+def add_ships(
+    voyage: Voyage,
+    storage: VM,
+    count: int,
+    start_index: int,
+    tokens: dict[str, str] | None = None,
+) -> list[VM]:
     """Add additional ships to a running voyage."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -92,7 +121,7 @@ def add_ships(voyage: Voyage, storage: VM, count: int, start_index: int) -> list
 
     with ThreadPoolExecutor(max_workers=count) as executor:
         futures = {
-            executor.submit(bootstrap_ship, voyage, storage, start_index + i): i
+            executor.submit(bootstrap_ship, voyage, storage, start_index + i, tokens): i
             for i in range(count)
         }
 

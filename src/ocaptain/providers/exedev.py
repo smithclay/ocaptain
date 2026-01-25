@@ -33,7 +33,7 @@ class ExeDevProvider(Provider):
     """exe.dev VM provider using SSH commands."""
 
     def create(self, name: str, *, wait: bool = True) -> VM:
-        result = _run_exedev("new", f"--name={name}", "--json")
+        result = _run_exedev("new", f"--name={name}", "--no-email", "--json")
         data = json.loads(result.stdout)
 
         vm = VM(

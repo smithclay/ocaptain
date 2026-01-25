@@ -209,11 +209,14 @@ def resume(
         raise typer.Exit(1) from None
 
     voyage, storage = voyage_mod.load_voyage(voyage_id)
-    voyage_status = tasks_mod.derive_status(voyage, storage)
+    provider = get_provider()
 
-    # Determine starting index
-    existing_ships = len(voyage_status.ships)
-    start_index = existing_ships
+    # Determine starting index from existing VMs, not task assignments.
+    vms = provider.list(prefix=voyage_id)
+    ship_indices = [
+        index for vm in vms if (index := _ship_index_from_name(voyage_id, vm.name)) is not None
+    ]
+    start_index = max(ship_indices, default=-1) + 1
 
     from .ship import add_ships
 
@@ -225,12 +228,13 @@ def resume(
 @app.command()
 def shell(
     voyage_id: str = typer.Argument(..., help="Voyage ID"),
-    ship_id: str = typer.Argument(..., help="Ship ID (e.g., ship-0)"),
+    ship_id: str = typer.Argument(..., help="Ship ID (e.g., ship-0 or ship0)"),
 ) -> None:
     """SSH into a ship for debugging."""
 
     provider = get_provider()
-    ship_name = f"{voyage_id}-{ship_id}"
+    ship_index = _parse_ship_index(ship_id)
+    ship_name = f"{voyage_id}-ship{ship_index}"
     vm = next((v for v in provider.list() if v.name == ship_name), None)
 
     if not vm:
@@ -305,6 +309,35 @@ def _task_status_style(status: tasks_mod.TaskStatus, is_stale: bool) -> str:
         return "[blue]in_progress[/blue]"
     else:
         return "[dim]pending[/dim]"
+
+
+def _parse_ship_index(ship_id: str) -> int:
+    """Parse ship index from "ship-<n>" or "ship<n>"."""
+    if ship_id.startswith("ship-"):
+        suffix = ship_id[5:]
+    elif ship_id.startswith("ship"):
+        suffix = ship_id[4:]
+    else:
+        suffix = ""
+
+    if not suffix.isdigit():
+        console.print(f"[red]Invalid ship id: {ship_id}[/red]")
+        raise typer.Exit(1)
+
+    return int(suffix)
+
+
+def _ship_index_from_name(voyage_id: str, name: str) -> int | None:
+    """Extract ship index from a VM name."""
+    prefix = f"{voyage_id}-ship"
+    if not name.startswith(prefix):
+        return None
+
+    suffix = name[len(prefix) :]
+    if not suffix.isdigit():
+        return None
+
+    return int(suffix)
 
 
 def _format_age(dt: datetime) -> str:

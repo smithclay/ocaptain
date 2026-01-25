@@ -70,16 +70,22 @@ class Task:
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "Task":
         metadata = data.get("metadata", {})
+        # Claude Code uses "subject" but our pre-created tasks use "title"
+        title = data.get("title") or data.get("subject", "")
+        # Handle missing timestamps (Claude-created tasks may not have them)
+        now = datetime.now(UTC)
+        created = _parse_datetime(data["created"]) if "created" in data else now
+        updated = _parse_datetime(data["updated"]) if "updated" in data else now
         return cls(
             id=data["id"],
-            title=data["title"],
+            title=title,
             description=data.get("description", ""),
             status=TaskStatus(data["status"]),
             blocked_by=data.get("blockedBy", []),
             blocks=data.get("blocks", []),
-            created=_parse_datetime(data["created"]),
-            updated=_parse_datetime(data["updated"]),
-            assignee=metadata.get("assignee"),
+            created=created,
+            updated=updated,
+            assignee=metadata.get("assignee") or metadata.get("ship"),
             claimed_at=(
                 _parse_datetime(metadata["claimed_at"]) if metadata.get("claimed_at") else None
             ),

@@ -1,12 +1,13 @@
 {
   "id": "1",
-  "title": "Create Spanish README (README.es.md)",
-  "description": "Create a Spanish language README file for the Hello-World repository.\n\nFile: README.es.md\n\nContent should include:\n- Spanish greeting: \"¡Hola Mundo!\"\n- Brief description in Spanish explaining this is a multilingual version\n- Link to the main README\n\nAcceptance: README.es.md exists and contains valid UTF-8 Spanish text",
+  "subject": "[ship-0] Create Spanish README (README.es.md)",
+  "description": "ASSIGNED TO: ship-0\n\nCreate a Spanish language README file for the Hello-World repository.\n\nFile: README.es.md\n\nContent should include:\n- Spanish greeting: \"¡Hola Mundo!\"\n- Brief description in Spanish explaining this is a multilingual version\n- Link to the main README\n\nAcceptance: README.es.md exists and contains valid UTF-8 Spanish text",
+  "activeForm": "Create Spanish README (README.es.md)",
   "status": "pending",
+  "blocks": [
+    "6"
+  ],
   "blockedBy": [],
-  "blocks": ["6"],
-  "created": "2026-01-25T12:00:00Z",
-  "updated": "2026-01-25T12:00:00Z",
   "metadata": {
     "voyage": "voyage-multilingual-readme",
     "ship": "ship-0",

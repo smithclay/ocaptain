@@ -30,8 +30,8 @@ def _build_ship_command(ship: VM, ship_id: str, voyage: Voyage, oauth_token: str
         # Use expect script to auto-accept the bypass permissions dialog
         f"~/.ocaptain/run-claude.exp "
         f"claude --dangerously-skip-permissions "
-        f"--system-prompt-file $HOME/voyage/prompt.md "
-        f"'Begin' "
+        f"--append-system-prompt-file $HOME/voyage/prompt.md "
+        f"'Execute STEP 1 now.' "
         f"2>&1 | tee -a ~/voyage/logs/{ship_id}.log ; "
         # Capture exit status and log it
         f"EXIT_CODE=$? && "

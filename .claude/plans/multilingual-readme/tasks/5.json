@@ -1,12 +1,13 @@
 {
   "id": "5",
-  "title": "Create Brazilian Portuguese README (README.pt-BR.md)",
-  "description": "Create a Brazilian Portuguese language README file for the Hello-World repository.\n\nFile: README.pt-BR.md\n\nContent should include:\n- Brazilian Portuguese greeting: \"Olá Mundo!\"\n- Brief description in Portuguese explaining this is a multilingual version\n- Link to the main README\n\nAcceptance: README.pt-BR.md exists and contains valid UTF-8 Portuguese text",
+  "subject": "[ship-4] Create Brazilian Portuguese README (README.pt-BR.md)",
+  "description": "ASSIGNED TO: ship-4\n\nCreate a Brazilian Portuguese language README file for the Hello-World repository.\n\nFile: README.pt-BR.md\n\nContent should include:\n- Brazilian Portuguese greeting: \"Olá Mundo!\"\n- Brief description in Portuguese explaining this is a multilingual version\n- Link to the main README\n\nAcceptance: README.pt-BR.md exists and contains valid UTF-8 Portuguese text",
+  "activeForm": "Create Brazilian Portuguese README (README.pt-BR.md)",
   "status": "pending",
+  "blocks": [
+    "6"
+  ],
   "blockedBy": [],
-  "blocks": ["6"],
-  "created": "2026-01-25T12:00:00Z",
-  "updated": "2026-01-25T12:00:00Z",
   "metadata": {
     "voyage": "voyage-multilingual-readme",
     "ship": "ship-4",

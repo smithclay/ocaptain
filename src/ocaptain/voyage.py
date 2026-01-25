@@ -114,7 +114,7 @@ def sail(
         c.put(BytesIO(voyage.to_json().encode()), f"{voyage_dir}/voyage.json")
 
         # 6. Write ship prompt template
-        prompt_content = render_ship_prompt(voyage, has_tasks=tasks_dir is not None)
+        prompt_content = render_ship_prompt(voyage)
         c.put(BytesIO(prompt_content.encode()), f"{voyage_dir}/prompt.md")
 
         # 7. Write spec.md if provided
@@ -248,13 +248,9 @@ def sink_all() -> int:
     return len(vms)
 
 
-def render_ship_prompt(voyage: Voyage, has_tasks: bool = False) -> str:
+def render_ship_prompt(voyage: Voyage) -> str:
     """Render the ship prompt template."""
-    if has_tasks:
-        # Use simplified prompt when tasks are pre-created
-        template = files("ocaptain.templates").joinpath("ship_prompt_with_tasks.md").read_text()
-    else:
-        template = files("ocaptain.templates").joinpath("ship_prompt.md").read_text()
+    template = files("ocaptain.templates").joinpath("ship_prompt.md").read_text()
 
     return template.format(
         voyage_id=voyage.id,

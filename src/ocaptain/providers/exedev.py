@@ -80,19 +80,6 @@ class ExeDevProvider(Provider):
                 hide=True,
             )
 
-    def install_zellij(self, vm: VM) -> None:
-        """Install zellij on a VM (typically storage VM for session management)."""
-        with Connection(vm.ssh_dest) as c:
-            # Install zellij to user's local bin
-            c.run("mkdir -p ~/.local/bin", hide=True)
-            c.run(
-                "curl -fsSL https://github.com/zellij-org/zellij/releases/latest/download/"
-                "zellij-x86_64-unknown-linux-musl.tar.gz | tar xz -C ~/.local/bin",
-                hide=True,
-            )
-            # Verify installation (use full path since ~/.local/bin may not be in PATH yet)
-            c.run("~/.local/bin/zellij --version", hide=True)
-
     def destroy(self, vm_id: str) -> None:
         _run_exedev("rm", vm_id)
 

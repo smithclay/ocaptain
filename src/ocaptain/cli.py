@@ -98,8 +98,7 @@ def sail(
     console.print(f"  Repo: {voyage.repo}")
     console.print(f"  Branch: {voyage.branch}")
     console.print(f"  Ships: {voyage.ship_count}")
-    if plan:
-        console.print(f"  Plan: {Path(plan).name}")
+    console.print(f"  Plan: {Path(plan).name}")
     console.print("\nShips are now autonomous. Check status with:")
     console.print(f"  [dim]ocaptain status {voyage.id}[/dim]")
 

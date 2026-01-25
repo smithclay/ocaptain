@@ -18,7 +18,6 @@ class OcaptainConfig(BaseModel):
     provider: str = "exedev"
     default_ships: Annotated[int, Field(gt=0)] = 3
     stale_threshold_minutes: Annotated[int, Field(gt=0)] = 30
-    ssh_options: list[str] = ["-o", "StrictHostKeyChecking=accept-new"]
 
 
 def load_config() -> OcaptainConfig:

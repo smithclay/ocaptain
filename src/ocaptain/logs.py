@@ -17,7 +17,7 @@ def view_logs(
     """View aggregated logs from storage VM."""
 
     pattern = f"{ship_id}.log" if ship_id else "*.log"
-    path = f"/voyage/logs/{pattern}"
+    path = f"~/voyage/logs/{pattern}"
 
     # Build command
     if follow:

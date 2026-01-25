@@ -1,7 +1,7 @@
 """Ship VM provisioning and bootstrap."""
 
 import json
-from io import StringIO
+from io import BytesIO
 
 from fabric import Connection
 
@@ -28,22 +28,26 @@ def bootstrap_ship(voyage: Voyage, storage: VM, index: int) -> VM:
     ship = provider.create(ship_name)
 
     with Connection(ship.ssh_dest) as c:
-        # 2. Mount shared storage
+        # Get home directory for SFTP operations (c.put doesn't expand ~)
+        home = c.run("echo $HOME", hide=True).stdout.strip()
+
+        # 2. Install sshfs and mount shared storage
+        c.run("sudo apt-get update -qq && sudo apt-get install -y -qq sshfs", hide=True)
         c.run("mkdir -p ~/voyage ~/tasks")
-        c.run(
-            f"sshfs {storage.ssh_dest}:/voyage ~/voyage "
-            "-o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3"
+        # Add storage to known_hosts and mount via sshfs
+        sshfs_opts = (
+            "reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,StrictHostKeyChecking=no"
         )
+        c.run(f"sshfs {storage.ssh_dest}:voyage ~/voyage -o {sshfs_opts}")
         c.run(
-            f"sshfs {storage.ssh_dest}:~/.claude/tasks/{voyage.task_list_id} ~/tasks "
-            "-o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3"
+            f"sshfs {storage.ssh_dest}:.claude/tasks/{voyage.task_list_id} ~/tasks -o {sshfs_opts}"
         )
 
         # 3. Write ship identity
         c.run("mkdir -p ~/.ocaptain/hooks")
-        c.put(StringIO(ship_id), "~/.ocaptain/ship_id")
-        c.put(StringIO(voyage.id), "~/.ocaptain/voyage_id")
-        c.put(StringIO(storage.ssh_dest), "~/.ocaptain/storage_ssh")
+        c.put(BytesIO(ship_id.encode()), f"{home}/.ocaptain/ship_id")
+        c.put(BytesIO(voyage.id.encode()), f"{home}/.ocaptain/voyage_id")
+        c.put(BytesIO(storage.ssh_dest.encode()), f"{home}/.ocaptain/storage_ssh")
 
         # 4. Install stop hook
         c.run("cp ~/voyage/on-stop.sh ~/.ocaptain/hooks/on-stop.sh")
@@ -62,14 +66,14 @@ def bootstrap_ship(voyage: Voyage, storage: VM, index: int) -> VM:
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": "~/.ocaptain/hooks/on-stop.sh",
+                                "command": f"{home}/.ocaptain/hooks/on-stop.sh",
                             }
                         ],
                     }
                 ]
             },
         }
-        c.put(StringIO(json.dumps(settings, indent=2)), "~/.claude/settings.json")
+        c.put(BytesIO(json.dumps(settings, indent=2).encode()), f"{home}/.claude/settings.json")
 
         # 6. Start Claude Code (detached)
         c.run(

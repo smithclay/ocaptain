@@ -5,7 +5,7 @@ import secrets
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
-from io import StringIO
+from io import BytesIO
 
 from fabric import Connection
 
@@ -50,7 +50,8 @@ class Voyage:
         return f"{self.id}-storage"
 
     def ship_name(self, index: int) -> str:
-        return f"{self.id}-ship-{index}"
+        # exe.dev doesn't allow hyphen before trailing numbers
+        return f"{self.id}-ship{index}"
 
 
 def sail(prompt: str, repo: str, ships: int | None = None) -> Voyage:
@@ -70,41 +71,44 @@ def sail(prompt: str, repo: str, ships: int | None = None) -> Voyage:
     storage = provider.create(voyage.storage_name)
 
     with Connection(storage.ssh_dest) as c:
+        # Get home directory for SFTP operations (c.put doesn't expand ~)
+        home = c.run("echo $HOME", hide=True).stdout.strip()
+        voyage_dir = f"{home}/voyage"
+
         # 2. Create directory structure
-        c.run("mkdir -p /voyage/{workspace,artifacts,logs}")
+        c.run("mkdir -p ~/voyage/{workspace,artifacts,logs}")
         c.run(f"mkdir -p ~/.claude/tasks/{voyage.task_list_id}")
 
-        # 3. Clone repository
-        c.run(f"git clone --branch main git@github.com:{repo}.git /voyage/workspace")
-        c.run(f"cd /voyage/workspace && git checkout -b {voyage.branch}")
+        # 3. Clone repository (use HTTPS for public repos)
+        c.run(f"git clone https://github.com/{repo}.git ~/voyage/workspace")
+        c.run(f"cd ~/voyage/workspace && git checkout -b {voyage.branch}")
 
         # 4. Write voyage.json
-        c.put(StringIO(voyage.to_json()), "/voyage/voyage.json")
+        c.put(BytesIO(voyage.to_json().encode()), f"{voyage_dir}/voyage.json")
 
         # 5. Write ship prompt template
         prompt_content = render_ship_prompt(voyage)
-        c.put(StringIO(prompt_content), "/voyage/prompt.md")
+        c.put(BytesIO(prompt_content.encode()), f"{voyage_dir}/prompt.md")
 
         # 6. Write stop hook
         hook_content = render_stop_hook()
-        c.put(StringIO(hook_content), "/voyage/on-stop.sh")
-        c.run("chmod +x /voyage/on-stop.sh")
+        c.put(BytesIO(hook_content.encode()), f"{voyage_dir}/on-stop.sh")
+        c.run("chmod +x ~/voyage/on-stop.sh")
 
-    # 7. Bootstrap ships (parallel)
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    # 7. Bootstrap ships (sequential for now - parallel has SSH issues)
+    import time
 
     from .ship import bootstrap_ship
 
-    with ThreadPoolExecutor(max_workers=ships) as executor:
-        futures = {executor.submit(bootstrap_ship, voyage, storage, i): i for i in range(ships)}
+    # Small delay to let SSH multiplexing settle
+    time.sleep(1)
 
-        for future in as_completed(futures):
-            ship_index = futures[future]
-            try:
-                future.result()
-            except Exception as e:
-                # Log but continue - partial success is acceptable
-                print(f"Warning: ship-{ship_index} bootstrap failed: {e}")
+    for i in range(ships):
+        try:
+            bootstrap_ship(voyage, storage, i)
+        except Exception as e:
+            # Log but continue - partial success is acceptable
+            print(f"Warning: ship-{i} bootstrap failed: {e}")
 
     return voyage
 
@@ -122,7 +126,7 @@ def load_voyage(voyage_id: str) -> tuple[Voyage, VM]:
         raise ValueError(f"Voyage not found: {voyage_id}")
 
     with Connection(storage.ssh_dest) as c:
-        result = c.run("cat /voyage/voyage.json", hide=True)
+        result = c.run("cat ~/voyage/voyage.json", hide=True)
         voyage = Voyage.from_json(result.stdout)
 
     return voyage, storage
@@ -133,7 +137,7 @@ def abandon(voyage_id: str) -> int:
     provider = get_provider()
 
     vms = provider.list(prefix=voyage_id)
-    ships = [vm for vm in vms if "-ship-" in vm.name]
+    ships = [vm for vm in vms if "-ship" in vm.name and vm.name != f"{voyage_id}-storage"]
 
     for ship in ships:
         provider.destroy(ship.id)

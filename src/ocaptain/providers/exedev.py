@@ -1,71 +1,102 @@
-"""exe.dev VM provider implementation."""
+"""exe.dev VM provider implementation.
 
+exe.dev operates entirely over SSH - all commands are run via `ssh exe.dev <command>`.
+"""
+
+import json
+import subprocess  # nosec: B404
 import time
+from io import BytesIO
 
-import httpx
 from fabric import Connection
 
-from ..config import CONFIG
+from ..config import get_ssh_keypair
 from ..provider import VM, Provider, register_provider
+
+
+def _run_exedev(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    """Run an exe.dev command via SSH."""
+    cmd = ["ssh", "exe.dev", *args]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec: B603, B607
+    if result.returncode != 0 and check:
+        import sys
+
+        print(f"exe.dev command failed: {' '.join(args)}", file=sys.stderr)
+        print(f"stderr: {result.stderr}", file=sys.stderr)
+        print(f"stdout: {result.stdout}", file=sys.stderr)
+        result.check_returncode()
+    return result
 
 
 @register_provider("exedev")
 class ExeDevProvider(Provider):
-    """exe.dev VM provider."""
-
-    def __init__(self) -> None:
-        self.api_url = CONFIG.exedev_api_url
-        self.api_key = CONFIG.exedev_api_key
-        if not self.api_key:
-            raise ValueError("EXEDEV_API_KEY not set")
-
-        self.client = httpx.Client(
-            base_url=self.api_url,
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            timeout=60.0,
-        )
+    """exe.dev VM provider using SSH commands."""
 
     def create(self, name: str, *, wait: bool = True) -> VM:
-        resp = self.client.post("/vms", json={"name": name})
-        resp.raise_for_status()
-        data = resp.json()
+        result = _run_exedev("new", f"--name={name}", "--json")
+        data = json.loads(result.stdout)
 
         vm = VM(
-            id=data["id"],
-            name=name,
+            id=data["vm_name"],  # exe.dev uses name as ID
+            name=data["vm_name"],
             ssh_dest=data["ssh_dest"],
-            status=data["status"],
+            status="running",
         )
 
         if wait:
             self.wait_ready(vm)
+            # Inject ocaptain SSH keypair for VM-to-VM communication
+            self._inject_ssh_keys(vm)
 
         return vm
 
+    def _inject_ssh_keys(self, vm: VM) -> None:
+        """Inject the ocaptain SSH keypair into the VM and register with exe.dev."""
+        private_key, public_key = get_ssh_keypair()
+
+        with Connection(vm.ssh_dest) as c:
+            home = c.run("echo $HOME", hide=True).stdout.strip()
+            ssh_dir = f"{home}/.ssh"
+
+            # Ensure .ssh directory exists with correct permissions
+            c.run(f"mkdir -p {ssh_dir} && chmod 700 {ssh_dir}")
+
+            # Write private key
+            c.put(BytesIO(private_key.encode()), f"{ssh_dir}/id_ed25519")
+            c.run(f"chmod 600 {ssh_dir}/id_ed25519")
+
+            # Append public key to authorized_keys
+            c.put(BytesIO(public_key.encode()), f"{ssh_dir}/ocaptain_key.pub")
+            c.run(f"cat {ssh_dir}/ocaptain_key.pub >> {ssh_dir}/authorized_keys")
+            c.run(f"chmod 600 {ssh_dir}/authorized_keys")
+
+            # Register with exe.dev by running 'ssh exe.dev' (completes registration)
+            c.run("ssh -o StrictHostKeyChecking=no exe.dev whoami", hide=True, warn=True)
+
     def destroy(self, vm_id: str) -> None:
-        resp = self.client.delete(f"/vms/{vm_id}")
-        resp.raise_for_status()
+        _run_exedev("rm", vm_id)
 
     def get(self, vm_id: str) -> VM | None:
-        resp = self.client.get(f"/vms/{vm_id}")
-        if resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-        data = resp.json()
-        return VM(
-            id=data["id"],
-            name=data["name"],
-            ssh_dest=data["ssh_dest"],
-            status=data["status"],
-        )
+        vms = self.list()
+        return next((vm for vm in vms if vm.id == vm_id), None)
 
     def list(self, prefix: str | None = None) -> list[VM]:
-        resp = self.client.get("/vms")
-        resp.raise_for_status()
+        result = _run_exedev("ls", "--json")
 
+        # Handle empty list case
+        if not result.stdout.strip() or "No VMs found" in result.stdout:
+            return []
+
+        data = json.loads(result.stdout)
+        vm_list = data.get("vms") or []
         vms = [
-            VM(id=d["id"], name=d["name"], ssh_dest=d["ssh_dest"], status=d["status"])
-            for d in resp.json()["vms"]
+            VM(
+                id=d["vm_name"],
+                name=d["vm_name"],
+                ssh_dest=d["ssh_dest"],
+                status=d.get("status", "unknown"),
+            )
+            for d in vm_list
         ]
 
         if prefix:

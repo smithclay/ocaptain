@@ -46,9 +46,9 @@ def test_voyage_ship_name() -> None:
     """Test ship VM naming."""
     voyage = Voyage.create("Test", "owner/repo", 3)
 
-    assert voyage.ship_name(0) == f"{voyage.id}-ship-0"
-    assert voyage.ship_name(1) == f"{voyage.id}-ship-1"
-    assert voyage.ship_name(2) == f"{voyage.id}-ship-2"
+    assert voyage.ship_name(0) == f"{voyage.id}-ship0"
+    assert voyage.ship_name(1) == f"{voyage.id}-ship1"
+    assert voyage.ship_name(2) == f"{voyage.id}-ship2"
 
 
 def test_voyage_is_immutable() -> None:

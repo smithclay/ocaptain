@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
-from io import StringIO
+from io import BytesIO
 
 # Forward reference for Voyage to avoid circular import
 from typing import TYPE_CHECKING, Any
@@ -247,7 +247,9 @@ def derive_status(voyage: "Voyage", storage: VM) -> VoyageStatus:
 def reset_task(storage: VM, voyage: "Voyage", task_id: str) -> bool:
     """Reset a stale task to pending."""
     with Connection(storage.ssh_dest) as c:
-        task_path = f"~/.claude/tasks/{voyage.task_list_id}/{task_id}.json"
+        # Get home directory for SFTP operations
+        home = c.run("echo $HOME", hide=True).stdout.strip()
+        task_path = f"{home}/.claude/tasks/{voyage.task_list_id}/{task_id}.json"
 
         # Read current task
         result = c.run(f"cat {task_path}", hide=True)
@@ -261,7 +263,7 @@ def reset_task(storage: VM, voyage: "Voyage", task_id: str) -> bool:
             task_data["metadata"].pop("claimed_at", None)
 
         # Write back
-        c.put(StringIO(json.dumps(task_data, indent=2)), task_path)
+        c.put(BytesIO(json.dumps(task_data, indent=2).encode()), task_path)
 
         return True
 

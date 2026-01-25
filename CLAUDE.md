@@ -4,6 +4,10 @@
 
 ocaptain is a lightweight multi-coding agent control plane.
 
+## Running Commands
+
+Always use `uv run` to execute Python scripts and CLI commands (e.g., `uv run ocaptain sail ...`).
+
 ## CLI Commands
 
 - `ocaptain sail -r <repo> "<prompt>"` - Launch a new voyage

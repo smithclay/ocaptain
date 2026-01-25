@@ -1,0 +1,15 @@
+{
+  "id": "3",
+  "title": "Create German README (README.de.md)",
+  "description": "Create a German language README file for the Hello-World repository.\n\nFile: README.de.md\n\nContent should include:\n- German greeting: \"Hallo Welt!\"\n- Brief description in German explaining this is a multilingual version\n- Link to the main README\n\nAcceptance: README.de.md exists and contains valid UTF-8 German text",
+  "status": "pending",
+  "blockedBy": [],
+  "blocks": ["6"],
+  "created": "2026-01-25T12:00:00Z",
+  "updated": "2026-01-25T12:00:00Z",
+  "metadata": {
+    "voyage": "voyage-multilingual-readme",
+    "ship": "ship-2",
+    "repo": "octocat/Hello-World"
+  }
+}

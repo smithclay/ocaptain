@@ -351,9 +351,9 @@ def _state_style(state: tasks_mod.VoyageState | tasks_mod.ShipState) -> str:
 
 def _task_status_style(status: tasks_mod.TaskStatus, is_stale: bool) -> str:
     """Apply Rich styling to task status."""
-    if status.value == "complete":
-        return "[green]complete[/green]"
-    elif status.value == "in_progress":
+    if status == tasks_mod.TaskStatus.COMPLETED:
+        return "[green]completed[/green]"
+    elif status == tasks_mod.TaskStatus.IN_PROGRESS:
         if is_stale:
             return "[red]in_progress (stale)[/red]"
         return "[blue]in_progress[/blue]"

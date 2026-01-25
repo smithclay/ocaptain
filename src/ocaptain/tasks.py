@@ -33,7 +33,7 @@ def _parse_datetime(value: str) -> datetime:
 class TaskStatus(str, Enum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
-    COMPLETE = "complete"
+    COMPLETED = "completed"
 
 
 class ShipState(str, Enum):
@@ -213,7 +213,7 @@ def derive_status(voyage: "Voyage", storage: VM) -> VoyageStatus:
         )
 
     # Count task states
-    complete = [t for t in tasks if t.status == TaskStatus.COMPLETE]
+    complete = [t for t in tasks if t.status == TaskStatus.COMPLETED]
     in_progress = [t for t in tasks if t.status == TaskStatus.IN_PROGRESS]
     pending = [t for t in tasks if t.status == TaskStatus.PENDING]
     stale = [t for t in in_progress if t.is_stale()]
@@ -234,7 +234,7 @@ def derive_status(voyage: "Voyage", storage: VM) -> VoyageStatus:
         if task.assignee:
             ship = ships_map[task.assignee]
 
-            if task.status == TaskStatus.COMPLETE:
+            if task.status == TaskStatus.COMPLETED:
                 ships_map[task.assignee] = ShipStatus(
                     id=ship.id,
                     state=ship.state,

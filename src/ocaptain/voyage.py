@@ -106,8 +106,8 @@ def sail(
             c.run(f"echo {shlex.quote(gh_token)} | gh auth login --with-token", hide=True)
             c.run("gh auth setup-git", hide=True)
 
-        # 4. Clone repository
-        c.run(f"git clone https://github.com/{repo}.git ~/voyage/workspace")
+        # 4. Clone repository (use gh CLI - handles auth properly after gh auth setup-git)
+        c.run(f"gh repo clone {repo} ~/voyage/workspace")
         c.run(f"cd ~/voyage/workspace && git checkout -b {voyage.branch}")
 
         # 5. Write voyage.json
@@ -143,24 +143,27 @@ def sail(
         c.put(BytesIO(hook_content.encode()), f"{voyage_dir}/on-stop.sh")
         c.run("chmod +x ~/voyage/on-stop.sh")
 
-    # 11. Bootstrap ships (sequential for now - parallel has SSH issues)
+    # 11. Bootstrap ships in parallel
     import logging
-    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from .ship import bootstrap_ship
 
     logger = logging.getLogger(__name__)
 
-    # Small delay to let SSH multiplexing settle
-    time.sleep(1)
-
     failed_ships: list[tuple[int, Exception]] = []
-    for i in range(ships):
-        try:
-            bootstrap_ship(voyage, storage, i, tokens)
-        except Exception as e:
-            logger.warning("Ship-%d bootstrap failed: %s", i, e)
-            failed_ships.append((i, e))
+    with ThreadPoolExecutor(max_workers=ships) as executor:
+        futures = {
+            executor.submit(bootstrap_ship, voyage, storage, i, tokens): i for i in range(ships)
+        }
+
+        for future in as_completed(futures):
+            ship_idx = futures[future]
+            try:
+                future.result()
+            except Exception as e:
+                logger.warning("Ship-%d bootstrap failed: %s", ship_idx, e)
+                failed_ships.append((ship_idx, e))
 
     if len(failed_ships) == ships:
         raise RuntimeError(

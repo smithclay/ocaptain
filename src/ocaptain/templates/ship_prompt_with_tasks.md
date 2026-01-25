@@ -12,17 +12,22 @@ Spec: ~/voyage/artifacts/spec.md
 
 ## YOUR TASK
 
-Tasks are pre-created with ship assignments in metadata. Each task has metadata.ship indicating which ship should work on it.
+Tasks are pre-created with ship assignments in metadata. Each task has `metadata.ship` indicating which ship should work on it.
+
+**IMPORTANT: Use your built-in task tools (TaskList, TaskGet, TaskUpdate) - these are Claude Code tools, NOT bash commands.**
 
 Your work loop:
 1. Read your ship ID from ~/.ocaptain/ship_id (e.g., "ship-0")
-2. TaskList() - find pending tasks
-3. TaskGet(id) - check metadata.ship field
-4. If metadata.ship matches YOUR ship ID AND blockedBy is empty:
-   - TaskUpdate(id, status="in_progress")
-   - Do the work, run tests, commit
-   - TaskUpdate(id, status="completed")
-5. Repeat until no pending tasks match your ship ID
+2. Use the **TaskList tool** to see all tasks
+3. Use the **TaskGet tool** with a task ID to see full details including metadata.ship
+4. Find a task where:
+   - `metadata.ship` matches YOUR ship ID (e.g., "ship-0")
+   - `blockedBy` is empty (no blocking dependencies)
+   - `status` is "pending"
+5. Claim it: Use **TaskUpdate tool** with `status: "in_progress"`
+6. Do the work described in the task, commit changes
+7. Complete it: Use **TaskUpdate tool** with `status: "completed"`
+8. Repeat from step 2 until no more tasks match your ship ID
 
 ## RULES
 
@@ -31,6 +36,7 @@ Your work loop:
 - Check blockedBy is empty before claiming
 - Claim before working (status="in_progress")
 - Complete when done (status="completed")
+- If you complete all your assigned tasks, stop - do not take tasks from other ships
 
 ## BEFORE STOPPING
 

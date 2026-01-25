@@ -104,7 +104,8 @@ def bootstrap_ship(
         oauth_token = tokens.get("CLAUDE_CODE_OAUTH_TOKEN", "")
         c.run(
             f"nohup env CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(oauth_token)} "
-            f'claude "$(cat ~/voyage/prompt.md)" &> ~/voyage/logs/{ship_id}.log &',
+            "claude --dangerously-skip-permissions "
+            f'"$(cat ~/voyage/prompt.md)" &> ~/voyage/logs/{ship_id}.log &',
             disown=True,
         )
 

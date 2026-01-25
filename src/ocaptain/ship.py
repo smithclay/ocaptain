@@ -68,16 +68,13 @@ def bootstrap_ship(
 
         # 5. Configure Claude Code
         c.run("mkdir -p ~/.claude")
-
-        env_settings: dict[str, str] = {
-            "CLAUDE_CODE_TASK_LIST_ID": voyage.task_list_id,
-        }
-        # Inject Claude Code OAuth token if available
-        if oauth_token := tokens.get("CLAUDE_CODE_OAUTH_TOKEN"):
-            env_settings["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
+        # Skip onboarding
+        c.run("echo '{\"hasCompletedOnboarding\":true}' > ~/.claude.json")
 
         settings = {
-            "env": env_settings,
+            "env": {
+                "CLAUDE_CODE_TASK_LIST_ID": voyage.task_list_id,
+            },
             "hooks": {
                 "Stop": [
                     {
@@ -93,24 +90,27 @@ def bootstrap_ship(
             },
         }
         c.put(BytesIO(json.dumps(settings, indent=2).encode()), f"{home}/.claude/settings.json")
-        # Secure the settings file (contains sensitive tokens)
-        c.run(f"chmod 600 {home}/.claude/settings.json")
 
         # 6. Authenticate GitHub CLI (if GH_TOKEN provided, for git push)
         if gh_token := tokens.get("GH_TOKEN"):
             c.run(f"echo {shlex.quote(gh_token)} | gh auth login --with-token", hide=True)
             c.run("gh auth setup-git", hide=True)
 
-        # 7. Start Claude Code (detached)
-        # Export env vars directly since settings.json env may be processed after auth
+        # 7. Write and run start script
+        # Use --system-prompt-file to avoid shell quoting issues
         oauth_token = tokens.get("CLAUDE_CODE_OAUTH_TOKEN", "")
-        c.run(
-            f"nohup env CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(oauth_token)} "
-            f"CLAUDE_CODE_TASK_LIST_ID={shlex.quote(voyage.task_list_id)} "
-            "claude -p --dangerously-skip-permissions "
-            f'"$(cat ~/voyage/prompt.md)" &> ~/voyage/logs/{ship_id}.log &',
-            disown=True,
-        )
+        # Use 'script' with -c for pseudo-TTY (fixes CLI hang without TTY)
+        start_script = f"""#!/bin/bash
+export CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(oauth_token)}
+export CLAUDE_CODE_TASK_LIST_ID={shlex.quote(voyage.task_list_id)}
+cd ~/voyage/workspace
+
+script -q ~/voyage/logs/{ship_id}.log -c \\
+  "claude -p --dangerously-skip-permissions --system-prompt-file ~/voyage/prompt.md 'Begin'"
+"""
+        c.put(BytesIO(start_script.encode()), f"{home}/.ocaptain/start.sh")
+        c.run(f"chmod +x {home}/.ocaptain/start.sh")
+        c.run(f"nohup {home}/.ocaptain/start.sh &", disown=True)
 
     return ship
 

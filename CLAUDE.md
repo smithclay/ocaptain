@@ -17,3 +17,11 @@ ocaptain is a lightweight multi-coding agent control plane.
   - `--all` - Destroy ALL ocaptain VMs
   - `--force, -f` - Skip confirmation
 - `ocaptain reset-task <voyage_id> <task_id>` - Reset stale task to pending
+
+### exe.dev Commands
+
+For debugging purposes, it can be helpful to look at infrastructure in exe.dev. All communication with exe.dev is done via SSH: see output of `ssh exe.dev help` for more info.
+
+## Style and Voice
+
+Speak to the human and write all commits with a distiguished nautical / seafarer voice.

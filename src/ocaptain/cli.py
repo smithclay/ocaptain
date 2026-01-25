@@ -1,7 +1,9 @@
 """Typer CLI for ocaptain."""
 
+import re
 import subprocess  # nosec B404
 from datetime import datetime
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -23,11 +25,50 @@ console = Console()
 
 @app.command()
 def sail(
-    prompt: str = typer.Argument(..., help="The objective for the voyage"),
+    prompt: str = typer.Argument(None, help="The objective for the voyage"),
     repo: str = typer.Option(..., "--repo", "-r", help="GitHub repo (owner/name)"),
     ships: int = typer.Option(3, "--ships", "-n", help="Number of ships to provision"),
+    plan: str = typer.Option(None, "--plan", "-p", help="Path to voyage plan file"),
 ) -> None:
     """Launch a new voyage."""
+    # Handle plan file
+    plan_content: str | None = None
+    exit_criteria: list[str] | None = None
+
+    if plan:
+        plan_path = Path(plan)
+        if not plan_path.exists():
+            console.print(f"[red]Error:[/red] Plan file not found: {plan}")
+            raise typer.Exit(1)
+
+        plan_content = plan_path.read_text()
+
+        # Validate plan has required sections
+        validation_errors = _validate_plan(plan_content)
+        if validation_errors:
+            console.print("[red]Error:[/red] Invalid plan file:")
+            for error in validation_errors:
+                console.print(f"  - {error}")
+            raise typer.Exit(1)
+
+        # Extract objective from plan if prompt not provided
+        if not prompt:
+            extracted = _extract_objective(plan_content)
+            if not extracted:
+                console.print("[red]Error:[/red] Could not extract objective from plan")
+                raise typer.Exit(1)
+            prompt = extracted
+
+        # Extract exit criteria
+        exit_criteria = _extract_exit_criteria(plan_content)
+        console.print(f"[dim]Plan loaded: {plan_path.name}[/dim]")
+        console.print(f"[dim]  Tasks: {_count_tasks(plan_content)}[/dim]")
+        console.print(f"[dim]  Exit criteria: {len(exit_criteria or [])} commands[/dim]")
+
+    elif not prompt:
+        console.print("[red]Error:[/red] Either prompt or --plan is required")
+        raise typer.Exit(1)
+
     # Load and validate tokens before provisioning
     try:
         tokens = load_tokens()
@@ -44,12 +85,16 @@ def sail(
             raise typer.Exit(1) from None
 
     with console.status(f"Launching voyage with {ships} ships..."):
-        voyage = voyage_mod.sail(prompt, repo, ships, tokens)
+        voyage = voyage_mod.sail(
+            prompt, repo, ships, tokens, plan_content=plan_content, exit_criteria=exit_criteria
+        )
 
     console.print(f"\n[green]✓[/green] Voyage [bold]{voyage.id}[/bold] launched")
     console.print(f"  Repo: {voyage.repo}")
     console.print(f"  Branch: {voyage.branch}")
     console.print(f"  Ships: {voyage.ship_count}")
+    if plan:
+        console.print(f"  Plan: {Path(plan).name}")
     console.print("\nShips are now autonomous. Check status with:")
     console.print(f"  [dim]ocaptain status {voyage.id}[/dim]")
 
@@ -354,6 +399,80 @@ def _format_age(dt: datetime) -> str:
     else:
         hours = minutes // 60
         return f"{hours}h{minutes % 60}m"
+
+
+def _validate_plan(content: str) -> list[str]:
+    """Validate plan file has required sections. Returns list of errors."""
+    errors = []
+    required_sections = ["## Objective", "## Tasks", "## Exit Criteria", "## Requirements"]
+
+    for section in required_sections:
+        if section not in content:
+            errors.append(f"Missing required section: {section}")
+
+    # Check that Tasks section has at least one numbered task
+    if "## Tasks" in content:
+        tasks_match = re.search(r"## Tasks\s*\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
+        if tasks_match:
+            tasks_text = tasks_match.group(1)
+            if not re.search(r"^\d+\.", tasks_text, re.MULTILINE):
+                errors.append("Tasks section has no numbered tasks")
+
+    # Check that Exit Criteria has a code block
+    if "## Exit Criteria" in content:
+        criteria_match = re.search(r"## Exit Criteria\s*\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
+        if criteria_match:
+            criteria_text = criteria_match.group(1)
+            if "```" not in criteria_text:
+                errors.append("Exit Criteria section missing code block with commands")
+
+    return errors
+
+
+def _extract_objective(content: str) -> str | None:
+    """Extract objective from plan file."""
+    match = re.search(r"## Objective\s*\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
+    if match:
+        objective = match.group(1).strip()
+        # Take first paragraph or first 500 chars
+        first_para = objective.split("\n\n")[0]
+        return first_para[:500] if len(first_para) > 500 else first_para
+    return None
+
+
+def _extract_exit_criteria(content: str) -> list[str]:
+    """Extract exit criteria commands from plan file."""
+    criteria_match = re.search(r"## Exit Criteria\s*\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
+    if not criteria_match:
+        return []
+
+    criteria_text = criteria_match.group(1)
+
+    # Find code block
+    code_match = re.search(r"```(?:bash|sh)?\s*\n(.*?)```", criteria_text, re.DOTALL)
+    if not code_match:
+        return []
+
+    code_block = code_match.group(1)
+
+    # Extract non-comment, non-empty lines
+    commands = []
+    for line in code_block.strip().split("\n"):
+        line = line.strip()
+        if line and not line.startswith("#"):
+            commands.append(line)
+
+    return commands
+
+
+def _count_tasks(content: str) -> int:
+    """Count numbered tasks in plan file."""
+    tasks_match = re.search(r"## Tasks\s*\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
+    if not tasks_match:
+        return 0
+
+    tasks_text = tasks_match.group(1)
+    return len(re.findall(r"^\d+\.", tasks_text, re.MULTILINE))
 
 
 def main() -> None:

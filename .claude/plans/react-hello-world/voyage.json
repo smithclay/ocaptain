@@ -1,6 +1,6 @@
 {
   "name": "voyage-react-hello-world",
-  "repo": "test-org/react-hello-world",
+  "repo": "octocat/hello-world",
   "recommended_ships": 8,
   "max_parallel_width": 8,
   "total_tasks": 20,

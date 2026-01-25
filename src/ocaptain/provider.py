@@ -3,7 +3,18 @@
 from abc import abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from typing import Protocol, runtime_checkable
+
+
+class VMStatus(str, Enum):
+    """VM lifecycle status."""
+
+    RUNNING = "running"
+    STOPPED = "stopped"
+    STARTING = "starting"
+    STOPPING = "stopping"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -13,7 +24,7 @@ class VM:
     id: str
     name: str
     ssh_dest: str  # user@host or user@ip
-    status: str  # "running", "stopped", etc.
+    status: VMStatus
 
 
 @runtime_checkable

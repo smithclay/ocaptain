@@ -11,7 +11,7 @@ from io import BytesIO
 from fabric import Connection
 
 from ..config import get_ssh_keypair
-from ..provider import VM, Provider, register_provider
+from ..provider import VM, Provider, VMStatus, register_provider
 
 
 def _run_exedev(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -40,11 +40,12 @@ class ExeDevProvider(Provider):
             id=data["vm_name"],  # exe.dev uses name as ID
             name=data["vm_name"],
             ssh_dest=data["ssh_dest"],
-            status="running",
+            status=VMStatus.RUNNING,
         )
 
         if wait:
-            self.wait_ready(vm)
+            if not self.wait_ready(vm):
+                raise TimeoutError(f"VM {vm.name} did not become SSH-accessible")
             # Inject ocaptain SSH keypair for VM-to-VM communication
             self._inject_ssh_keys(vm)
 
@@ -94,7 +95,7 @@ class ExeDevProvider(Provider):
                 id=d["vm_name"],
                 name=d["vm_name"],
                 ssh_dest=d["ssh_dest"],
-                status=d.get("status", "unknown"),
+                status=VMStatus(d.get("status", "unknown")),
             )
             for d in vm_list
         ]

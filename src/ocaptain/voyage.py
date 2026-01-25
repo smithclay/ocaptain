@@ -96,19 +96,37 @@ def sail(prompt: str, repo: str, ships: int | None = None) -> Voyage:
         c.run("chmod +x ~/voyage/on-stop.sh")
 
     # 7. Bootstrap ships (sequential for now - parallel has SSH issues)
+    import logging
     import time
 
     from .ship import bootstrap_ship
 
+    logger = logging.getLogger(__name__)
+
     # Small delay to let SSH multiplexing settle
     time.sleep(1)
 
+    failed_ships: list[tuple[int, Exception]] = []
     for i in range(ships):
         try:
             bootstrap_ship(voyage, storage, i)
         except Exception as e:
-            # Log but continue - partial success is acceptable
-            print(f"Warning: ship-{i} bootstrap failed: {e}")
+            logger.warning("Ship-%d bootstrap failed: %s", i, e)
+            failed_ships.append((i, e))
+
+    if len(failed_ships) == ships:
+        raise RuntimeError(
+            f"All {ships} ships failed to bootstrap: "
+            + ", ".join(f"ship-{i}: {e}" for i, e in failed_ships)
+        )
+
+    if failed_ships:
+        logger.warning(
+            "%d/%d ships failed to bootstrap: %s",
+            len(failed_ships),
+            ships,
+            [i for i, _ in failed_ships],
+        )
 
     return voyage
 

@@ -1,20 +1,23 @@
 """Configuration loading and defaults."""
 
 import json
+import logging
 import os
 import subprocess  # nosec: B404
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 class OcaptainConfig(BaseModel):
     """Global ocaptain configuration."""
 
     provider: str = "exedev"
-    default_ships: int = 3
-    stale_threshold_minutes: int = 30
+    default_ships: Annotated[int, Field(gt=0)] = 3
+    stale_threshold_minutes: Annotated[int, Field(gt=0)] = 30
     ssh_options: list[str] = ["-o", "StrictHostKeyChecking=accept-new"]
 
 
@@ -78,6 +81,12 @@ def get_ssh_keypair() -> tuple[str, str]:
             # Key might already be registered, that's OK
             if "already" in result.stderr.lower() or "already" in result.stdout.lower():
                 registered_path.write_text("registered")
+            else:
+                logger.warning(
+                    "Failed to register SSH key with exe.dev: %s %s",
+                    result.stderr,
+                    result.stdout,
+                )
 
     return private_key_path.read_text(), public_key_path.read_text()
 

@@ -1,6 +1,7 @@
 """Task list operations and status derivation."""
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -16,6 +17,17 @@ from .provider import VM
 
 if TYPE_CHECKING:
     from .voyage import Voyage
+
+logger = logging.getLogger(__name__)
+
+
+def _parse_datetime(value: str) -> datetime:
+    """Parse ISO datetime string ensuring timezone awareness."""
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        # Assume UTC for naive datetimes
+        dt = dt.replace(tzinfo=UTC)
+    return dt
 
 
 class TaskStatus(str, Enum):
@@ -65,19 +77,15 @@ class Task:
             status=TaskStatus(data["status"]),
             blocked_by=data.get("blockedBy", []),
             blocks=data.get("blocks", []),
-            created=datetime.fromisoformat(data["created"]),
-            updated=datetime.fromisoformat(data["updated"]),
+            created=_parse_datetime(data["created"]),
+            updated=_parse_datetime(data["updated"]),
             assignee=metadata.get("assignee"),
             claimed_at=(
-                datetime.fromisoformat(metadata["claimed_at"])
-                if metadata.get("claimed_at")
-                else None
+                _parse_datetime(metadata["claimed_at"]) if metadata.get("claimed_at") else None
             ),
             completed_by=metadata.get("completed_by"),
             completed_at=(
-                datetime.fromisoformat(metadata["completed_at"])
-                if metadata.get("completed_at")
-                else None
+                _parse_datetime(metadata["completed_at"]) if metadata.get("completed_at") else None
             ),
         )
 
@@ -91,7 +99,7 @@ class Task:
         return age.total_seconds() > threshold * 60
 
 
-@dataclass
+@dataclass(frozen=True)
 class ShipStatus:
     """Derived status for a ship."""
 
@@ -102,13 +110,13 @@ class ShipStatus:
     completed_count: int
 
 
-@dataclass
+@dataclass(frozen=True)
 class VoyageStatus:
     """Derived status for a voyage."""
 
     voyage: "Voyage"
     state: VoyageState
-    ships: list[ShipStatus]
+    ships: tuple[ShipStatus, ...]
     tasks_complete: int
     tasks_in_progress: int
     tasks_pending: int
@@ -148,7 +156,13 @@ def list_tasks(storage: VM, voyage: "Voyage") -> list[Task]:
                 # Skip whitespace between objects
                 while pos < len(content) and content[pos].isspace():
                     pos += 1
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    "Failed to parse task JSON at position %d: %s. Remaining content: %s",
+                    pos,
+                    e,
+                    content[pos : pos + 100],
+                )
                 break
 
         return tasks
@@ -162,7 +176,7 @@ def derive_status(voyage: "Voyage", storage: VM) -> VoyageStatus:
         return VoyageStatus(
             voyage=voyage,
             state=VoyageState.PLANNING,
-            ships=[],
+            ships=(),
             tasks_complete=0,
             tasks_in_progress=0,
             tasks_pending=0,
@@ -221,7 +235,7 @@ def derive_status(voyage: "Voyage", storage: VM) -> VoyageStatus:
                 completed_count=ship.completed_count,
             )
 
-    ships = sorted(ships_map.values(), key=lambda s: s.id)
+    ships = tuple(sorted(ships_map.values(), key=lambda s: s.id))
 
     # Derive voyage state
     voyage_state: VoyageState

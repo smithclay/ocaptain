@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ocaptain.provider import VM
+from ocaptain.provider import VM, VMStatus
 
 
 @pytest.fixture  # type: ignore[untyped-decorator]
@@ -14,7 +14,7 @@ def mock_vm() -> VM:
         id="vm-123",
         name="test-storage",
         ssh_dest="test@localhost",
-        status="running",
+        status=VMStatus.RUNNING,
     )
 
 

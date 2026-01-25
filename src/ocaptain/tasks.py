@@ -283,6 +283,8 @@ def derive_status(voyage: "Voyage", storage: VM) -> VoyageStatus:
     voyage_state: VoyageState
     if len(complete) == len(tasks):
         voyage_state = VoyageState.COMPLETE
+    elif len(in_progress) == 0 and pending:
+        voyage_state = VoyageState.PLANNING
     elif len(stale) == len(in_progress) and len(in_progress) > 0 and pending:
         voyage_state = VoyageState.STALLED
     else:

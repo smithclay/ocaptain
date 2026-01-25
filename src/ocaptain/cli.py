@@ -174,16 +174,6 @@ def tasks(
     console.print(table)
 
 
-@app.command()
-def abandon(
-    voyage_id: str = typer.Argument(..., help="Voyage ID"),
-) -> None:
-    """Terminate all ships (keep storage)."""
-
-    count = voyage_mod.abandon(voyage_id)
-    console.print(f"[green]✓[/green] Terminated {count} ships. Storage preserved.")
-
-
 @app.command(name="reset-task")
 def reset_task(
     voyage_id: str = typer.Argument(..., help="Voyage ID"),
@@ -254,9 +244,12 @@ def shell(
 def sink(
     voyage_id: str | None = typer.Argument(None, help="Voyage ID"),
     all_voyages: bool = typer.Option(False, "--all", help="Destroy ALL ocaptain VMs"),
+    include_storage: bool = typer.Option(
+        False, "--include-storage", "-s", help="Also destroy storage VM"
+    ),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
 ) -> None:
-    """Destroy voyage VMs."""
+    """Destroy voyage VMs (keeps storage by default)."""
 
     if all_voyages:
         if not force:
@@ -267,13 +260,18 @@ def sink(
         count = voyage_mod.sink_all()
         console.print(f"[green]✓[/green] Destroyed {count} VMs.")
     elif voyage_id:
-        if not force:
-            confirm = typer.confirm(f"Destroy all VMs for {voyage_id}?")
-            if not confirm:
-                raise typer.Abort()
+        if include_storage:
+            if not force:
+                confirm = typer.confirm(f"Destroy all VMs for {voyage_id} (including storage)?")
+                if not confirm:
+                    raise typer.Abort()
 
-        count = voyage_mod.sink(voyage_id)
-        console.print(f"[green]✓[/green] Destroyed {count} VMs.")
+            count = voyage_mod.sink(voyage_id)
+            console.print(f"[green]✓[/green] Destroyed {count} VMs.")
+        else:
+            # Default: destroy ships only, keep storage (no confirmation needed)
+            count = voyage_mod.abandon(voyage_id)
+            console.print(f"[green]✓[/green] Terminated {count} ships. Storage preserved.")
     else:
         console.print("[red]Specify voyage_id or --all[/red]")
         raise typer.Exit(1)

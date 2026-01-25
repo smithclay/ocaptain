@@ -2,6 +2,7 @@
 
 import json
 import secrets
+import shlex
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
@@ -89,23 +90,28 @@ def sail(
         c.run("mkdir -p ~/voyage/{workspace,artifacts,logs}")
         c.run(f"mkdir -p ~/.claude/tasks/{voyage.task_list_id}")
 
-        # 3. Clone repository (use HTTPS for public repos)
+        # 3. Authenticate GitHub CLI if token provided (for private repos)
+        if gh_token := tokens.get("GH_TOKEN"):
+            c.run(f"echo {shlex.quote(gh_token)} | gh auth login --with-token", hide=True)
+            c.run("gh auth setup-git", hide=True)
+
+        # 4. Clone repository
         c.run(f"git clone https://github.com/{repo}.git ~/voyage/workspace")
         c.run(f"cd ~/voyage/workspace && git checkout -b {voyage.branch}")
 
-        # 4. Write voyage.json
+        # 5. Write voyage.json
         c.put(BytesIO(voyage.to_json().encode()), f"{voyage_dir}/voyage.json")
 
-        # 5. Write ship prompt template
+        # 6. Write ship prompt template
         prompt_content = render_ship_prompt(voyage)
         c.put(BytesIO(prompt_content.encode()), f"{voyage_dir}/prompt.md")
 
-        # 6. Write stop hook
+        # 7. Write stop hook
         hook_content = render_stop_hook()
         c.put(BytesIO(hook_content.encode()), f"{voyage_dir}/on-stop.sh")
         c.run("chmod +x ~/voyage/on-stop.sh")
 
-    # 7. Bootstrap ships (sequential for now - parallel has SSH issues)
+    # 8. Bootstrap ships (sequential for now - parallel has SSH issues)
     import logging
     import time
 

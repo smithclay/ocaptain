@@ -97,10 +97,14 @@ def bootstrap_ship(
         # 6. Authenticate GitHub CLI (if GH_TOKEN provided, for git push)
         if gh_token := tokens.get("GH_TOKEN"):
             c.run(f"echo {shlex.quote(gh_token)} | gh auth login --with-token", hide=True)
+            c.run("gh auth setup-git", hide=True)
 
         # 7. Start Claude Code (detached)
+        # Export token as env var since settings.json env is processed after auth check
+        oauth_token = tokens.get("CLAUDE_CODE_OAUTH_TOKEN", "")
         c.run(
-            f"nohup claude --prompt-file ~/voyage/prompt.md &> ~/voyage/logs/{ship_id}.log &",
+            f"nohup env CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(oauth_token)} "
+            f'claude "$(cat ~/voyage/prompt.md)" &> ~/voyage/logs/{ship_id}.log &',
             disown=True,
         )
 

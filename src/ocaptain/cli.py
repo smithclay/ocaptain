@@ -224,61 +224,6 @@ def tasks(
     console.print(table)
 
 
-@app.command(name="reset-task")
-def reset_task(
-    voyage_id: str = typer.Argument(..., help="Voyage ID"),
-    task_id: str | None = typer.Argument(None, help="Task ID (or --all-stale)"),
-    all_stale: bool = typer.Option(False, "--all-stale", help="Reset all stale tasks"),
-) -> None:
-    """Reset stale task(s) to pending."""
-
-    voyage, storage = voyage_mod.load_voyage(voyage_id)
-
-    if all_stale:
-        count = tasks_mod.reset_stale_tasks(storage, voyage)
-        console.print(f"[green]✓[/green] Reset {count} stale tasks to pending.")
-    elif task_id:
-        tasks_mod.reset_task(storage, voyage, task_id)
-        console.print(f"[green]✓[/green] Reset {task_id} to pending.")
-    else:
-        console.print("[red]Specify task_id or --all-stale[/red]")
-        raise typer.Exit(1)
-
-
-@app.command()
-def resume(
-    voyage_id: str = typer.Argument(..., help="Voyage ID"),
-    ships: int = typer.Option(1, "--ships", "-n", help="Number of ships to add"),
-) -> None:
-    """Add ships to an incomplete voyage."""
-    from . import tmux as tmux_mod
-    from .ship import add_ships
-
-    # Load tokens before provisioning
-    try:
-        tokens = load_tokens()
-    except ValueError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1) from None
-
-    voyage, storage = voyage_mod.load_voyage(voyage_id)
-    provider = get_provider()
-
-    # Determine starting index from existing VMs, not task assignments.
-    vms = provider.list(prefix=voyage_id)
-    ship_indices = [
-        index for vm in vms if (index := _ship_index_from_name(voyage_id, vm.name)) is not None
-    ]
-    start_index = max(ship_indices, default=-1) + 1
-
-    new_ships = add_ships(voyage, storage, ships, start_index, tokens)
-
-    # Launch new ships via tmux (adds panes to existing session)
-    tmux_mod.add_ships_to_session(voyage, storage, new_ships, start_index, tokens)
-
-    console.print(f"[green]✓[/green] Added {len(new_ships)} ships to voyage.")
-
-
 @app.command()
 def shell(
     voyage_id: str = typer.Argument(..., help="Voyage ID"),
@@ -400,19 +345,6 @@ def _parse_ship_index(ship_id: str) -> int:
     return int(suffix)
 
 
-def _ship_index_from_name(voyage_id: str, name: str) -> int | None:
-    """Extract ship index from a VM name."""
-    prefix = f"{voyage_id}-ship"
-    if not name.startswith(prefix):
-        return None
-
-    suffix = name[len(prefix) :]
-    if not suffix.isdigit():
-        return None
-
-    return int(suffix)
-
-
 def _format_age(dt: datetime) -> str:
     """Format datetime as human-readable age."""
     from datetime import UTC, datetime
@@ -459,45 +391,6 @@ def _validate_plan_dir(plan_dir: Path) -> list[str]:
     return errors
 
 
-def _validate_plan(content: str) -> list[str]:
-    """Validate plan file has required sections. Returns list of errors."""
-    errors = []
-    required_sections = ["## Objective", "## Tasks", "## Exit Criteria", "## Requirements"]
-
-    for section in required_sections:
-        if section not in content:
-            errors.append(f"Missing required section: {section}")
-
-    # Check that Tasks section has at least one numbered task
-    if "## Tasks" in content:
-        tasks_match = re.search(r"## Tasks\s*\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
-        if tasks_match:
-            tasks_text = tasks_match.group(1)
-            if not re.search(r"^\d+\.", tasks_text, re.MULTILINE):
-                errors.append("Tasks section has no numbered tasks")
-
-    # Check that Exit Criteria has a code block
-    if "## Exit Criteria" in content:
-        criteria_match = re.search(r"## Exit Criteria\s*\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
-        if criteria_match:
-            criteria_text = criteria_match.group(1)
-            if "```" not in criteria_text:
-                errors.append("Exit Criteria section missing code block with commands")
-
-    return errors
-
-
-def _extract_objective(content: str) -> str | None:
-    """Extract objective from plan file."""
-    match = re.search(r"## Objective\s*\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
-    if match:
-        objective = match.group(1).strip()
-        # Take first paragraph or first 500 chars
-        first_para = objective.split("\n\n")[0]
-        return first_para[:500] if len(first_para) > 500 else first_para
-    return None
-
-
 def _extract_objective_from_spec(content: str) -> str | None:
     """Extract objective from spec.md file."""
     # Try "## Objective" first, then "# ... Specification" title
@@ -513,41 +406,6 @@ def _extract_objective_from_spec(content: str) -> str | None:
         return match.group(1).replace(" Specification", "").strip()
 
     return None
-
-
-def _extract_exit_criteria(content: str) -> list[str]:
-    """Extract exit criteria commands from plan file."""
-    criteria_match = re.search(r"## Exit Criteria\s*\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
-    if not criteria_match:
-        return []
-
-    criteria_text = criteria_match.group(1)
-
-    # Find code block
-    code_match = re.search(r"```(?:bash|sh)?\s*\n(.*?)```", criteria_text, re.DOTALL)
-    if not code_match:
-        return []
-
-    code_block = code_match.group(1)
-
-    # Extract non-comment, non-empty lines
-    commands = []
-    for line in code_block.strip().split("\n"):
-        line = line.strip()
-        if line and not line.startswith("#"):
-            commands.append(line)
-
-    return commands
-
-
-def _count_tasks(content: str) -> int:
-    """Count numbered tasks in plan file."""
-    tasks_match = re.search(r"## Tasks\s*\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
-    if not tasks_match:
-        return 0
-
-    tasks_text = tasks_match.group(1)
-    return len(re.findall(r"^\d+\.", tasks_text, re.MULTILINE))
 
 
 def main() -> None:

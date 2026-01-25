@@ -37,6 +37,54 @@ def test_task_from_json() -> None:
     assert not task.is_stale()
 
 
+def test_task_from_json_with_subject_instead_of_title() -> None:
+    """Test parsing Claude Code format task with 'subject' field."""
+    data = {
+        "id": "task-001",
+        "subject": "Task via Claude Code",
+        "status": "pending",
+    }
+    task = Task.from_json(data)
+    assert task.title == "Task via Claude Code"
+
+
+def test_task_from_json_missing_timestamps() -> None:
+    """Test parsing task without created/updated fields."""
+    data = {"id": "task-001", "title": "No timestamps", "status": "pending"}
+    task = Task.from_json(data)
+    assert task.created is not None
+    assert task.updated is not None
+
+
+def test_task_from_json_owner_field_precedence() -> None:
+    """Test owner field takes precedence over metadata.assignee."""
+    data = {
+        "id": "task-001",
+        "title": "Test",
+        "status": "in_progress",
+        "owner": "ship-1",
+        "metadata": {"assignee": "ship-0"},
+        "created": "2026-01-24T10:00:00+00:00",
+        "updated": "2026-01-24T10:00:00+00:00",
+    }
+    task = Task.from_json(data)
+    assert task.assignee == "ship-1"
+
+
+def test_task_from_json_metadata_ship_fallback() -> None:
+    """Test metadata.ship is used as assignee fallback."""
+    data = {
+        "id": "task-001",
+        "title": "Test",
+        "status": "pending",
+        "metadata": {"ship": "ship-2"},
+        "created": "2026-01-24T10:00:00+00:00",
+        "updated": "2026-01-24T10:00:00+00:00",
+    }
+    task = Task.from_json(data)
+    assert task.assignee == "ship-2"
+
+
 def test_task_from_json_with_metadata() -> None:
     """Test parsing a task with metadata."""
     data = {

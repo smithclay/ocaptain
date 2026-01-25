@@ -22,7 +22,9 @@ def _build_ship_command(ship: VM, ship_id: str, voyage: Voyage, oauth_token: str
     # Wrapper script that captures errors and keeps window open for debugging
     # Uses unbuffered output via tee and captures exit status
     # Uses expect script to auto-accept the bypass permissions dialog
+    # set -o pipefail ensures $? captures Claude/expect exit code, not tee
     remote_cmd = (
+        f"set -o pipefail && "
         f"cd ~/voyage/workspace && "
         f"echo '[{ship_id}] Starting at '$(date -Iseconds) >> ~/voyage/logs/{ship_id}.log && "
         f"export CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(oauth_token)} && "
@@ -61,15 +63,16 @@ def launch_fleet(voyage: Voyage, storage: VM, ships: list[VM], tokens: dict[str,
     with Connection(storage.ssh_dest) as c:
         # Create new detached tmux session with first ship
         if ships:
-            first_cmd = _build_ship_command(ships[0], "ship-0", voyage, oauth_token)
+            first_ship_id = _ship_id_from_vm(voyage, ships[0]) or "ship-0"
+            first_cmd = _build_ship_command(ships[0], first_ship_id, voyage, oauth_token)
             c.run(
-                f"tmux new-session -d -s {session} -n ship-0 {shlex.quote(first_cmd)}",
+                f"tmux new-session -d -s {session} -n {first_ship_id} {shlex.quote(first_cmd)}",
                 hide=True,
             )
 
             # Add windows for remaining ships
             for i, ship in enumerate(ships[1:], start=1):
-                ship_id = f"ship-{i}"
+                ship_id = _ship_id_from_vm(voyage, ship) or f"ship-{i}"
                 cmd = _build_ship_command(ship, ship_id, voyage, oauth_token)
                 c.run(
                     f"tmux new-window -t {session} -n {ship_id} {shlex.quote(cmd)}",
@@ -89,8 +92,8 @@ def attach_session(storage: VM, voyage_id: str, ship_index: int | None = None) -
         Command list suitable for subprocess.run()
     """
     if ship_index is not None:
-        # Attach and select specific window
-        tmux_cmd = f"tmux attach -t {voyage_id}:{ship_index}"
+        # Attach and select specific window by name.
+        tmux_cmd = f"tmux attach -t {voyage_id}:ship-{ship_index}"
     else:
         tmux_cmd = f"tmux attach -t {voyage_id}"
 
@@ -103,27 +106,14 @@ def kill_session(storage: VM, voyage_id: str) -> None:
         c.run(f"tmux kill-session -t {voyage_id}", warn=True, hide=True)
 
 
-def add_ships_to_session(
-    voyage: Voyage, storage: VM, ships: list[VM], start_index: int, tokens: dict[str, str]
-) -> None:
-    """Add new ship windows to an existing tmux session.
+def _ship_id_from_vm(voyage: Voyage, ship: VM) -> str | None:
+    """Extract ship id (ship-<n>) from VM name."""
+    prefix = f"{voyage.id}-ship"
+    if not ship.name.startswith(prefix):
+        return None
 
-    Args:
-        voyage: The voyage configuration
-        storage: The storage VM where tmux runs
-        ships: List of new ship VMs to add
-        start_index: The starting index for ship numbering
-        tokens: Dict with CLAUDE_CODE_OAUTH_TOKEN
-    """
-    oauth_token = tokens.get("CLAUDE_CODE_OAUTH_TOKEN", "")
-    session = voyage.id
+    suffix = ship.name[len(prefix) :]
+    if not suffix.isdigit():
+        return None
 
-    with Connection(storage.ssh_dest) as c:
-        for i, ship in enumerate(ships):
-            ship_id = f"ship-{start_index + i}"
-            cmd = _build_ship_command(ship, ship_id, voyage, oauth_token)
-            c.run(
-                f"tmux new-window -t {session} -n {ship_id} {shlex.quote(cmd)}",
-                hide=True,
-                warn=True,
-            )
+    return f"ship-{suffix}"

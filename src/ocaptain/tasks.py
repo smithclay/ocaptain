@@ -5,7 +5,6 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
-from io import BytesIO
 
 # Forward reference for Voyage to avoid circular import
 from typing import TYPE_CHECKING, Any
@@ -163,41 +162,45 @@ def list_tasks(storage: VM, voyage: "Voyage") -> list[Task]:
                 while pos < len(content) and content[pos].isspace():
                     pos += 1
             except json.JSONDecodeError as e:
-                logger.warning(
-                    "Failed to parse task JSON at position %d: %s. Remaining content: %s",
+                logger.error(
+                    "Failed to parse task JSON for voyage %s at position %d, "
+                    "returning %d of potentially more tasks: %s",
+                    voyage.task_list_id,
                     pos,
+                    len(tasks),
                     e,
-                    content[pos : pos + 100],
                 )
                 break
 
         return tasks
 
 
-def _check_progress_file(storage: VM) -> str | None:
-    """Check progress.txt for status indicators. Returns last line if exists."""
+def _check_voyage_artifacts(storage: VM) -> tuple[bool, bool]:
+    """Check voyage artifacts for status indicators.
+
+    Returns:
+        Tuple of (has_completion_marker, has_progress_file)
+    """
     try:
         with Connection(storage.ssh_dest) as c:
-            result = c.run(
-                "tail -1 ~/voyage/artifacts/progress.txt 2>/dev/null || echo ''",
-                hide=True,
+            check_cmd = (
+                "test -f ~/voyage/artifacts/voyage-complete.marker "
+                "&& echo marker:yes || echo marker:no; "
+                "test -f ~/voyage/artifacts/progress.txt "
+                "&& echo progress:yes || echo progress:no"
             )
-            return result.stdout.strip() or None
-    except Exception:
-        return None
-
-
-def _check_completion_marker(storage: VM) -> bool:
-    """Check if voyage-complete.marker exists."""
-    try:
-        with Connection(storage.ssh_dest) as c:
-            result = c.run(
-                "test -f ~/voyage/artifacts/voyage-complete.marker && echo yes || echo no",
-                hide=True,
-            )
-            return str(result.stdout).strip() == "yes"
-    except Exception:
-        return False
+            result = c.run(check_cmd, hide=True)
+            output = result.stdout.strip()
+            has_marker = "marker:yes" in output
+            has_progress = "progress:yes" in output
+            return has_marker, has_progress
+    except Exception as e:
+        logger.warning(
+            "Failed to check voyage artifacts on storage %s: %s",
+            storage.ssh_dest,
+            e,
+        )
+        return False, False
 
 
 def derive_status(voyage: "Voyage", storage: VM) -> VoyageStatus:
@@ -205,11 +208,11 @@ def derive_status(voyage: "Voyage", storage: VM) -> VoyageStatus:
     tasks = list_tasks(storage, voyage)
 
     if not tasks:
-        # No tasks - check for completion marker
-        if _check_completion_marker(storage):
+        # No tasks - check artifacts for status
+        has_marker, has_progress = _check_voyage_artifacts(storage)
+        if has_marker:
             inferred_state = VoyageState.COMPLETE
-        elif _check_progress_file(storage):
-            # Progress exists but no marker - still working
+        elif has_progress:
             inferred_state = VoyageState.RUNNING
         else:
             inferred_state = VoyageState.PLANNING
@@ -231,52 +234,50 @@ def derive_status(voyage: "Voyage", storage: VM) -> VoyageStatus:
     pending = [t for t in tasks if t.status == TaskStatus.PENDING]
     stale = [t for t in in_progress if t.is_stale()]
 
-    # Derive ship states from task metadata
-    ships_map: dict[str, ShipStatus] = {}
+    # Derive ship states from task metadata using mutable intermediate state
+    ship_data: dict[str, dict[str, Any]] = {}
 
     for task in tasks:
-        if task.assignee and task.assignee not in ships_map:
-            ships_map[task.assignee] = ShipStatus(
-                id=task.assignee,
-                state=ShipState.UNKNOWN,
-                current_task=None,
-                claimed_at=None,
-                completed_count=0,
-            )
+        if not task.assignee:
+            continue
 
-        if task.assignee:
-            ship = ships_map[task.assignee]
+        if task.assignee not in ship_data:
+            ship_data[task.assignee] = {
+                "state": ShipState.UNKNOWN,
+                "current_task": None,
+                "claimed_at": None,
+                "completed_count": 0,
+            }
 
-            if task.status == TaskStatus.COMPLETED:
-                ships_map[task.assignee] = ShipStatus(
-                    id=ship.id,
-                    state=ship.state,
-                    current_task=ship.current_task,
-                    claimed_at=ship.claimed_at,
-                    completed_count=ship.completed_count + 1,
-                )
-            elif task.status == TaskStatus.IN_PROGRESS:
-                state = ShipState.STALE if task.is_stale() else ShipState.WORKING
-                ships_map[task.assignee] = ShipStatus(
-                    id=ship.id,
-                    state=state,
-                    current_task=task.id,
-                    claimed_at=task.claimed_at,
-                    completed_count=ship.completed_count,
-                )
+        data = ship_data[task.assignee]
+        if task.status == TaskStatus.COMPLETED:
+            data["completed_count"] += 1
+        elif task.status == TaskStatus.IN_PROGRESS:
+            data["state"] = ShipState.STALE if task.is_stale() else ShipState.WORKING
+            data["current_task"] = task.id
+            data["claimed_at"] = task.claimed_at
 
     # Ships with no in-progress task but completed tasks are idle
-    for ship_id, ship in ships_map.items():
-        if ship.state == ShipState.UNKNOWN and ship.completed_count > 0:
-            ships_map[ship_id] = ShipStatus(
-                id=ship.id,
-                state=ShipState.IDLE,
-                current_task=None,
-                claimed_at=None,
-                completed_count=ship.completed_count,
-            )
+    for data in ship_data.values():
+        if data["state"] == ShipState.UNKNOWN and data["completed_count"] > 0:
+            data["state"] = ShipState.IDLE
 
-    ships = tuple(sorted(ships_map.values(), key=lambda s: s.id))
+    # Convert to frozen ShipStatus objects
+    ships = tuple(
+        sorted(
+            (
+                ShipStatus(
+                    id=ship_id,
+                    state=data["state"],
+                    current_task=data["current_task"],
+                    claimed_at=data["claimed_at"],
+                    completed_count=data["completed_count"],
+                )
+                for ship_id, data in ship_data.items()
+            ),
+            key=lambda s: s.id,
+        )
+    )
 
     # Derive voyage state
     voyage_state: VoyageState
@@ -297,38 +298,3 @@ def derive_status(voyage: "Voyage", storage: VM) -> VoyageStatus:
         tasks_stale=len(stale),
         tasks_total=len(tasks),
     )
-
-
-def reset_task(storage: VM, voyage: "Voyage", task_id: str) -> bool:
-    """Reset a stale task to pending."""
-    with Connection(storage.ssh_dest) as c:
-        # Get home directory for SFTP operations
-        home = c.run("echo $HOME", hide=True).stdout.strip()
-        task_path = f"{home}/.claude/tasks/{voyage.task_list_id}/{task_id}.json"
-
-        # Read current task
-        result = c.run(f"cat {task_path}", hide=True)
-        task_data = json.loads(result.stdout)
-
-        # Update status
-        task_data["status"] = "pending"
-        task_data["updated"] = datetime.now(UTC).isoformat()
-        if "metadata" in task_data:
-            task_data["metadata"].pop("assignee", None)
-            task_data["metadata"].pop("claimed_at", None)
-
-        # Write back
-        c.put(BytesIO(json.dumps(task_data, indent=2).encode()), task_path)
-
-        return True
-
-
-def reset_stale_tasks(storage: VM, voyage: "Voyage") -> int:
-    """Reset all stale tasks to pending."""
-    tasks = list_tasks(storage, voyage)
-    stale = [t for t in tasks if t.is_stale()]
-
-    for task in stale:
-        reset_task(storage, voyage, task.id)
-
-    return len(stale)

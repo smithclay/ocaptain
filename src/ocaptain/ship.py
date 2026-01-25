@@ -2,6 +2,7 @@
 
 import json
 import shlex
+from importlib.resources import files
 from io import BytesIO
 
 from fabric import Connection
@@ -67,37 +68,8 @@ def bootstrap_ship(
         # 4. Install stop hook
         c.run("cp ~/voyage/on-stop.sh ~/.ocaptain/hooks/on-stop.sh")
 
-        # 4b. Create expect script for auto-accepting bypass permissions dialog
-        # Handle multiple TUI dialogs by selecting "continue" options
-        expect_script = r"""#!/usr/bin/expect -f
-set timeout -1
-spawn -noecho {*}$argv
-# Loop to handle multiple dialogs (bypass permissions, settings errors, etc.)
-# Each dialog has 2 options - we want to select option 2 and continue
-expect {
-    "Yes, I accept" {
-        # Bypass permissions dialog - select option 2
-        send "\x1b\[B"
-        sleep 0.1
-        send "\r"
-        exp_continue
-    }
-    "Continue without these settings" {
-        # Settings error dialog - select option 2 to continue
-        send "\x1b\[B"
-        sleep 0.1
-        send "\r"
-        exp_continue
-    }
-    "Begin" {
-        # Claude is ready for input - start interaction
-    }
-    timeout {
-        # Fallback - just interact
-    }
-}
-interact
-"""
+        # 4b. Install expect script for auto-accepting bypass permissions dialog
+        expect_script = files("ocaptain.templates").joinpath("run_claude.exp").read_text()
         c.put(BytesIO(expect_script.encode()), f"{home}/.ocaptain/run-claude.exp")
         c.run("chmod +x ~/.ocaptain/run-claude.exp")
 
@@ -134,30 +106,3 @@ interact
         # Ship is now ready - Claude will be launched via zellij from storage
 
     return ship
-
-
-def add_ships(
-    voyage: Voyage,
-    storage: VM,
-    count: int,
-    start_index: int,
-    tokens: dict[str, str] | None = None,
-) -> list[VM]:
-    """Add additional ships to a running voyage."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    ships: list[VM] = []
-
-    with ThreadPoolExecutor(max_workers=count) as executor:
-        futures = {
-            executor.submit(bootstrap_ship, voyage, storage, start_index + i, tokens): i
-            for i in range(count)
-        }
-
-        for future in as_completed(futures):
-            try:
-                ships.append(future.result())
-            except Exception as e:
-                print(f"Warning: ship bootstrap failed: {e}")
-
-    return ships

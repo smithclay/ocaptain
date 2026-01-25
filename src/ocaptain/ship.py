@@ -96,6 +96,10 @@ def bootstrap_ship(
         # Skip onboarding
         c.run("echo '{\"hasCompletedOnboarding\":true}' > ~/.claude.json")
 
+        # 5b. Set locale environment variables for proper UTF-8 handling
+        c.run("echo 'export LANG=C.UTF-8' >> ~/.bashrc")
+        c.run("echo 'export LC_CTYPE=C.UTF-8' >> ~/.bashrc")
+
         env_vars = {"CLAUDE_CODE_TASK_LIST_ID": voyage.task_list_id}
 
         if telemetry:

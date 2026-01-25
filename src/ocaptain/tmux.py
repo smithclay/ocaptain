@@ -27,6 +27,7 @@ def _build_ship_command(ship: VM, ship_id: str, voyage: Voyage, oauth_token: str
         f"set -o pipefail && "
         f"cd ~/voyage/workspace && "
         f"echo '[{ship_id}] Starting at '$(date -Iseconds) >> ~/voyage/logs/{ship_id}.log && "
+        f"export LANG=C.utf8 LC_CTYPE=C.utf8 LC_ALL=C.utf8 && "
         f"export CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(oauth_token)} && "
         f"export CLAUDE_CODE_TASK_LIST_ID={shlex.quote(voyage.task_list_id)} && "
         # Use expect script to auto-accept the bypass permissions dialog

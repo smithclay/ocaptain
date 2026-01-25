@@ -10,6 +10,7 @@ from typing import Protocol, runtime_checkable
 class VMStatus(str, Enum):
     """VM lifecycle status."""
 
+    CREATING = "creating"
     RUNNING = "running"
     STOPPED = "stopped"
     STARTING = "starting"

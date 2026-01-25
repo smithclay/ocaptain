@@ -103,6 +103,10 @@ def sail(
         c.run("mkdir -p ~/voyage/{workspace,artifacts,logs}")
         c.run(f"mkdir -p ~/.claude/tasks/{voyage.task_list_id}")
 
+        # 2b. Set locale environment variables for proper UTF-8 handling
+        c.run("echo 'export LANG=C.UTF-8' >> ~/.bashrc")
+        c.run("echo 'export LC_CTYPE=C.UTF-8' >> ~/.bashrc")
+
         # 3. Authenticate GitHub CLI if token provided (for private repos)
         if gh_token := tokens.get("GH_TOKEN"):
             c.run(f"echo {shlex.quote(gh_token)} | gh auth login --with-token", hide=True)

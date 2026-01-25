@@ -45,14 +45,16 @@ def bootstrap_ship(
 
         # 2. Install sshfs and mount shared storage
         c.run("sudo apt-get update -qq && sudo apt-get install -y -qq sshfs", hide=True)
-        c.run("mkdir -p ~/voyage ~/tasks")
+        c.run(f"mkdir -p ~/voyage ~/.claude/tasks/{voyage.task_list_id}")
         # Add storage to known_hosts and mount via sshfs
         sshfs_opts = (
             "reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,StrictHostKeyChecking=no"
         )
         c.run(f"sshfs {storage.ssh_dest}:voyage ~/voyage -o {sshfs_opts}")
+        # Mount task directory where Claude Code expects it
         c.run(
-            f"sshfs {storage.ssh_dest}:.claude/tasks/{voyage.task_list_id} ~/tasks -o {sshfs_opts}"
+            f"sshfs {storage.ssh_dest}:.claude/tasks/{voyage.task_list_id} "
+            f"~/.claude/tasks/{voyage.task_list_id} -o {sshfs_opts}"
         )
 
         # 3. Write ship identity

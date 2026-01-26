@@ -372,15 +372,21 @@ def sink(
 @app.command()
 def telemetry_start() -> None:
     """Start the local telemetry collector."""
-    script_path = Path(__file__).parent.parent.parent / "scripts" / "start-telemetry.sh"
-    subprocess.run([str(script_path)], check=True)  # nosec: B603, B607
+    from importlib.resources import as_file, files
+
+    script = files("ocaptain.scripts").joinpath("start-telemetry.sh")
+    with as_file(script) as script_path:
+        subprocess.run(["bash", str(script_path)], check=True)  # nosec: B603, B607
 
 
 @app.command()
 def telemetry_stop() -> None:
     """Stop the local telemetry collector."""
-    script_path = Path(__file__).parent.parent.parent / "scripts" / "stop-telemetry.sh"
-    subprocess.run([str(script_path)], check=True)  # nosec: B603, B607
+    from importlib.resources import as_file, files
+
+    script = files("ocaptain.scripts").joinpath("stop-telemetry.sh")
+    with as_file(script) as script_path:
+        subprocess.run(["bash", str(script_path)], check=True)  # nosec: B603, B607
 
 
 # Helper functions

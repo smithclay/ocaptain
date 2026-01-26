@@ -12,6 +12,22 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 
+class TailscaleConfig(BaseModel):
+    """Tailscale configuration for ship networking."""
+
+    oauth_secret: str | None = None  # OCAPTAIN_TAILSCALE_OAUTH_SECRET
+    ip: str | None = None  # Auto-detected or manual override
+    ship_tag: str = "tag:ocaptain-ship"  # Tag applied to ships for ACL isolation
+
+
+class LocalStorageConfig(BaseModel):
+    """Local storage configuration (laptop as storage)."""
+
+    workspace_dir: str = "~/voyages"
+    user: str | None = None  # SSH user, defaults to current user
+    otlp_port: int = 4318
+
+
 class OcaptainConfig(BaseModel):
     """Global ocaptain configuration."""
 
@@ -19,6 +35,26 @@ class OcaptainConfig(BaseModel):
     default_ships: Annotated[int, Field(gt=0)] = 3
     stale_threshold_minutes: Annotated[int, Field(gt=0)] = 30
     telemetry_enabled: bool = True
+    providers: dict[str, dict[str, str]] = {}  # {"sprites": {"org": "my-org"}}
+    tailscale: TailscaleConfig = TailscaleConfig()
+    local: LocalStorageConfig = LocalStorageConfig()
+
+
+def _get_tailscale_ip() -> str | None:
+    """Auto-detect tailscale IP if available."""
+    try:
+        result = subprocess.run(  # nosec: B603, B607
+            ["tailscale", "ip", "-4"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
 
 
 def load_config() -> OcaptainConfig:
@@ -36,6 +72,24 @@ def load_config() -> OcaptainConfig:
 
     if telemetry := os.environ.get("OCAPTAIN_TELEMETRY"):
         data["telemetry_enabled"] = telemetry.lower() in ("1", "true", "yes")
+
+    # Load sprites org from environment
+    if sprites_org := os.environ.get("OCAPTAIN_SPRITES_ORG"):
+        data.setdefault("providers", {}).setdefault("sprites", {})["org"] = sprites_org
+
+    # Load tailscale config from environment
+    if oauth_secret := os.environ.get("OCAPTAIN_TAILSCALE_OAUTH_SECRET"):
+        data.setdefault("tailscale", {})["oauth_secret"] = oauth_secret
+
+    # Auto-detect tailscale IP if not set
+    tailscale_data = data.get("tailscale", {})
+    if not tailscale_data.get("ip") and (detected_ip := _get_tailscale_ip()):
+        data.setdefault("tailscale", {})["ip"] = detected_ip
+
+    # Set default user to current user
+    local_data = data.get("local", {})
+    if not local_data.get("user"):
+        data.setdefault("local", {})["user"] = os.environ.get("USER", "user")
 
     return OcaptainConfig(**data)
 

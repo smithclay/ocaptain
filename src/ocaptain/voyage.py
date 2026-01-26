@@ -467,7 +467,7 @@ def sail_new(
         )
 
     # 10. Launch local tmux session
-    from .tmux import launch_fleet_new  # type: ignore[attr-defined]
+    from .tmux import launch_fleet_new
 
     ship_vms = [vm for vm, _ in successful_ships]
     ship_vms.sort(key=lambda vm: int(vm.name.split("ship")[-1]))

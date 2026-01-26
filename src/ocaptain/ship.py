@@ -2,13 +2,154 @@
 
 import json
 import shlex
+from contextlib import contextmanager
 from importlib.resources import files
 from io import BytesIO
 
 from fabric import Connection
 
-from .provider import VM, get_provider
+from .provider import VM, Provider, get_provider
 from .voyage import Voyage
+
+
+def _is_sprite_vm(vm: VM) -> bool:
+    """Check if a VM is a sprite (uses sprite:// URI scheme)."""
+    return vm.ssh_dest.startswith("sprite://")
+
+
+@contextmanager
+def _get_connection(vm: VM, provider: Provider):  # type: ignore[no-untyped-def]
+    """Get appropriate connection for a VM (Fabric or Sprite)."""
+    if _is_sprite_vm(vm):
+        from .providers.sprites import SpritesProvider
+
+        if isinstance(provider, SpritesProvider):
+            with provider.get_connection(vm) as c:
+                yield c
+        else:
+            raise ValueError(f"Sprite VM requires SpritesProvider, got {type(provider)}")
+    else:
+        with Connection(vm.ssh_dest) as c:
+            yield c
+
+
+def _mount_storage_exedev(  # type: ignore[no-untyped-def]
+    c, storage: VM, voyage: Voyage, telemetry: bool
+) -> None:
+    """Mount storage on an exe.dev ship using direct SSH/SSHFS."""
+    # Install sshfs, expect (for auto-accepting bypass permissions dialog), and autossh
+    c.run(
+        "sudo apt-get update -qq && sudo apt-get install -y -qq sshfs expect autossh",
+        hide=True,
+    )
+
+    # Mount via direct sshfs
+    sshfs_opts = "reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,StrictHostKeyChecking=no"
+    c.run(f"sshfs {storage.ssh_dest}:voyage ~/voyage -o {sshfs_opts}")
+    c.run(
+        f"sshfs {storage.ssh_dest}:.claude/tasks/{voyage.task_list_id} "
+        f"~/.claude/tasks/{voyage.task_list_id} -o {sshfs_opts}"
+    )
+
+    # Establish autossh tunnel for OTLP telemetry
+    if telemetry:
+        c.run(
+            f"autossh -f -N -M 0 "
+            f"-o StrictHostKeyChecking=no "
+            f"-o ServerAliveInterval=15 "
+            f"-o ServerAliveCountMax=3 "
+            f"-L 4318:localhost:4318 {storage.ssh_dest}"
+        )
+
+
+def _mount_storage_sprite(  # type: ignore[no-untyped-def]
+    c, home: str, voyage: Voyage, storage_chisel_url: str | None, telemetry: bool
+) -> None:
+    """Mount storage on a sprite ship using chisel tunnel."""
+    if not storage_chisel_url:
+        raise ValueError("storage_chisel_url is required for sprite ships")
+
+    # Install sshfs, expect, and chisel
+    c.run(
+        "sudo apt-get update -qq && sudo apt-get install -y -qq sshfs expect",
+        hide=True,
+    )
+
+    # Install chisel
+    arch_cmd = "$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+    c.run(
+        f"curl -sL https://github.com/jpillora/chisel/releases/download/v1.10.1/"
+        f"chisel_1.10.1_linux_{arch_cmd}.gz | gunzip > /tmp/chisel && "
+        "sudo mv /tmp/chisel /usr/local/bin/chisel && "
+        "sudo chmod +x /usr/local/bin/chisel",
+        hide=True,
+    )
+
+    # Create .ocaptain directory for logs
+    c.run(f"mkdir -p {home}/.ocaptain")
+
+    # Build chisel tunnel ports: local:remote - ship connects to storage
+    # 2222:127.0.0.1:22 means: ship's localhost:2222 -> storage's localhost:22
+    tunnel_spec = "2222:127.0.0.1:22"
+    if telemetry:
+        tunnel_spec += " 4318:127.0.0.1:4318"
+
+    # Start chisel client to connect to storage
+    # Storage runs chisel server on port 8080, exposed via public URL
+    c.run(
+        f"nohup chisel client {storage_chisel_url}:8080 {tunnel_spec} "
+        f"> {home}/.ocaptain/chisel-client.log 2>&1 &",
+        hide=True,
+    )
+
+    # Wait for tunnel to establish
+    c.run("sleep 3")
+
+    # Check if chisel is running
+    result = c.run("pgrep -f 'chisel client' || echo 'NOT RUNNING'", warn=True)
+    if "NOT RUNNING" in result.stdout:
+        # Get error from log
+        log_result = c.run(f"cat {home}/.ocaptain/chisel-client.log", warn=True)
+        raise RuntimeError(f"Chisel client failed to start: {log_result.stdout}")
+
+    # Mount via sshfs through the chisel tunnel (localhost:2222)
+    # User is 'sprite' on sprites.dev VMs
+    sshfs_opts = "reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,StrictHostKeyChecking=no"
+    c.run(f"sshfs -p 2222 sprite@127.0.0.1:voyage ~/voyage -o {sshfs_opts}")
+    c.run(
+        f"sshfs -p 2222 sprite@127.0.0.1:.claude/tasks/{voyage.task_list_id} "
+        f"~/.claude/tasks/{voyage.task_list_id} -o {sshfs_opts}"
+    )
+
+
+def _bootstrap_tailscale(c: Connection, ship_name: str, oauth_secret: str, ship_tag: str) -> str:
+    """Install Tailscale and join tailnet with ACL isolation. Returns ship's Tailscale IP.
+
+    Ships are:
+    - Ephemeral: Auto-removed when destroyed
+    - Preauthorized: No manual approval needed
+    - Tagged: Isolated by ACL policy (can only reach laptop's OTLP port)
+    """
+    # Install Tailscale
+    c.run(
+        "curl -fsSL https://tailscale.com/install.sh | sh",
+        hide=True,
+    )
+
+    # Join tailnet with OAuth secret + URL parameters for ephemeral/preauthorized
+    # The OAuth secret acts as an auth key when used with ?ephemeral=true&preauthorized=true
+    auth_key = f"{oauth_secret}?ephemeral=true&preauthorized=true"
+    c.run(
+        f"sudo tailscale up "
+        f"--authkey={shlex.quote(auth_key)} "
+        f"--hostname={ship_name} "
+        f"--advertise-tags={ship_tag}",
+        hide=True,
+    )
+
+    # Get assigned IP
+    result = c.run("tailscale ip -4", hide=True)
+    return str(result.stdout.strip())
 
 
 def bootstrap_ship(
@@ -17,18 +158,19 @@ def bootstrap_ship(
     index: int,
     tokens: dict[str, str] | None = None,
     telemetry: bool = True,
+    storage_chisel_url: str | None = None,
 ) -> VM:
     """
     Bootstrap a single ship VM.
 
     1. Provision VM
-    2. Mount shared storage via SSHFS
+    2. Mount shared storage via SSHFS (or chisel tunnel for sprites)
     3. Write ship identity
     4. Install stop hook
     5. Configure Claude Code (with secure token injection)
     6. Authenticate GitHub CLI (if GH_TOKEN provided)
 
-    Note: Claude is launched separately via zellij from the storage VM.
+    Note: Claude is launched separately via tmux from the storage VM.
 
     Args:
         voyage: The voyage configuration
@@ -36,6 +178,7 @@ def bootstrap_ship(
         index: Ship index number
         tokens: Dict with CLAUDE_CODE_OAUTH_TOKEN and optionally GH_TOKEN
         telemetry: Enable OTLP telemetry tunnel to storage VM (default True)
+        storage_chisel_url: For sprites, the chisel server URL on storage VM
     """
     if tokens is None:
         tokens = {}
@@ -46,36 +189,19 @@ def bootstrap_ship(
     # 1. Provision
     ship = provider.create(ship_name)
 
-    with Connection(ship.ssh_dest) as c:
+    with _get_connection(ship, provider) as c:
         # Get home directory for SFTP operations (c.put doesn't expand ~)
         home = c.run("echo $HOME", hide=True).stdout.strip()
 
-        # 2. Install sshfs, expect (for auto-accepting bypass permissions dialog), and autossh
-        c.run(
-            "sudo apt-get update -qq && sudo apt-get install -y -qq sshfs expect autossh",
-            hide=True,
-        )
+        # 2. Install dependencies and mount storage
         c.run(f"mkdir -p ~/voyage ~/.claude/tasks/{voyage.task_list_id}")
-        # Add storage to known_hosts and mount via sshfs
-        sshfs_opts = (
-            "reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,StrictHostKeyChecking=no"
-        )
-        c.run(f"sshfs {storage.ssh_dest}:voyage ~/voyage -o {sshfs_opts}")
-        # Mount task directory where Claude Code expects it
-        c.run(
-            f"sshfs {storage.ssh_dest}:.claude/tasks/{voyage.task_list_id} "
-            f"~/.claude/tasks/{voyage.task_list_id} -o {sshfs_opts}"
-        )
 
-        # 2b. Establish autossh tunnel for OTLP telemetry
-        if telemetry:
-            c.run(
-                f"autossh -f -N -M 0 "
-                f"-o StrictHostKeyChecking=no "
-                f"-o ServerAliveInterval=15 "
-                f"-o ServerAliveCountMax=3 "
-                f"-L 4318:localhost:4318 {storage.ssh_dest}"
-            )
+        if _is_sprite_vm(ship):
+            # Sprites: use chisel tunnel for ship-to-storage communication
+            _mount_storage_sprite(c, home, voyage, storage_chisel_url, telemetry)
+        else:
+            # exe.dev: use direct SSH/SSHFS
+            _mount_storage_exedev(c, storage, voyage, telemetry)
 
         # 3. Write ship identity
         c.run("mkdir -p ~/.ocaptain/hooks")

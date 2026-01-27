@@ -1,6 +1,6 @@
 [project]
 name = "ocaptain"
-version = "2.2.0"
+version = "0.0.1"
 description = "Minimal control plane for multi-VM Claude Code orchestration"
 readme = "README.md"
 requires-python = ">=3.11"

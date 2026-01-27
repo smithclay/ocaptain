@@ -12,7 +12,13 @@ from .provider import VM, Provider, get_connection, get_provider, is_sprite_vm
 
 def _get_remote_user(ship_vm: VM) -> str:
     """Get the SSH user for a ship VM."""
-    return "sprite" if is_sprite_vm(ship_vm) else "ubuntu"
+    if is_sprite_vm(ship_vm):
+        return "sprite"
+    # exe.dev VMs use 'exedev' user
+    if ".exe.xyz" in ship_vm.ssh_dest or ".exe.dev" in ship_vm.ssh_dest:
+        return "exedev"
+    # Default for other providers
+    return "ubuntu"
 
 
 def _get_remote_home(ship_vm: VM) -> str:
@@ -38,13 +44,16 @@ def _copy_file_to_ship(
         with get_connection(ship_vm, provider) as c:
             c.put(local_path, remote_path)
     else:
+        remote_user = _get_remote_user(ship_vm)
         subprocess.run(  # nosec: B603, B607
             [
                 "scp",
+                "-P",
+                "2222",
                 "-o",
                 "StrictHostKeyChecking=no",
                 str(local_path),
-                f"ubuntu@{ship_ts_ip}:{remote_path}",
+                f"{remote_user}@{ship_ts_ip}:{remote_path}",
             ],
             check=True,
             capture_output=True,
@@ -258,12 +267,22 @@ def load_voyage(voyage_id: str) -> Voyage:
     return Voyage.from_json(voyage_json.read_text())
 
 
+def _tailscale_logout(vm: VM, provider: Provider) -> None:
+    """Run tailscale logout on a VM to immediately remove from tailnet."""
+    try:
+        with get_connection(vm, provider) as c:
+            c.run("sudo tailscale logout", hide=True, warn=True, timeout=10)
+    except Exception:  # nosec: B110 - best effort cleanup, VM may be unreachable
+        pass
+
+
 def sink(voyage_id: str) -> int:
     """Destroy all VMs for a voyage."""
     provider = get_provider()
 
     vms = provider.list(prefix=voyage_id)
     for vm in vms:
+        _tailscale_logout(vm, provider)
         provider.destroy(vm.id)
 
     return len(vms)
@@ -275,6 +294,7 @@ def sink_all() -> int:
 
     vms = provider.list(prefix="voyage-")
     for vm in vms:
+        _tailscale_logout(vm, provider)
         provider.destroy(vm.id)
 
     return len(vms)

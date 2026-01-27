@@ -1,5 +1,6 @@
 # ocaptain
 
+[![PyPI](https://img.shields.io/pypi/v/ocaptain.svg)](https://pypi.org/project/ocaptain/)
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
 [![sprites.dev](https://img.shields.io/badge/Powered%20by-sprites.dev-purple.svg)](https://sprites.dev)
 
@@ -41,19 +42,20 @@ You (local) → ocaptain sail → sprites.dev VMs → Ships claim tasks → Code
 
 ### Prerequisites
 
-1. [sprites.dev](https://sprites.dev) account with `sprite` CLI installed
+1. [sprites.dev](https://sprites.dev) account with `sprite` CLI installed or [exe.dev](https://exe.dev) account.
 2. [Tailscale](https://tailscale.com) installed and running
 3. [Mutagen](https://mutagen.io) installed (`brew install mutagen-io/mutagen/mutagen`)
 4. Claude Code long-lived OAuth token (subscription required, from `claude setup-token`)
-5. Tailscale OAuth secret for ephemeral auth keys
+5. Tailscale OAuth secret for ephemeral auth keys (used to connect VMs)
 
 ### Install
 
 ```bash
-# Clone and install
-git clone https://github.com/smithclay/ocaptain.git
-cd ocaptain
-uv sync
+# Install from PyPI (recommended)
+uv tool install ocaptain
+
+# Or run directly without installing
+uvx ocaptain doctor
 ```
 
 ### Set credentials
@@ -75,7 +77,7 @@ export GH_TOKEN="ghp_xxxx"
 ### Check prerequisites
 
 ```bash
-uv run ocaptain doctor
+ocaptain doctor
 ```
 
 ### Make a plan
@@ -105,22 +107,22 @@ Plan a voyage with ocaptain: take an empty repository and make a to-do list app.
 
 ```bash
 # A plan is required, see "Make a plan" above
-uv run ocaptain sail ./examples/generated-plans/multilingual-readme
+ocaptain sail ./examples/generated-plans/multilingual-readme
 
 # Monitor status
-uv run ocaptain status
+ocaptain status
 
 # Attach to a ship's tmux session to watch Claude work
-uv run ocaptain shell voyage-abc123 ship-0
+ocaptain shell voyage-abc123 ship-0
 
 # View aggregated logs
-uv run ocaptain logs voyage-abc123 --follow
+ocaptain logs voyage-abc123 --follow
 
 # Clone the workspace when done
-uv run ocaptain clone voyage-abc123
+ocaptain clone voyage-abc123
 
 # Scuttle the fleet
-uv run ocaptain sink voyage-abc123
+ocaptain sink voyage-abc123
 ```
 
 ## Architecture
@@ -137,7 +139,7 @@ flowchart TB
         TS[100.x.x.x]
     end
 
-    subgraph Sprites["sprites.dev"]
+    subgraph Sprites["sprites.dev or exe.dev"]
         subgraph Fleet["Ship VMs"]
             S0[Ship 0<br/>Claude Code]
             S1[Ship 1<br/>Claude Code]
@@ -178,7 +180,7 @@ flowchart TB
 Launch a new voyage from a plan directory.
 
 ```bash
-uv run ocaptain sail ./plans/add-auth --ships 5
+ocaptain sail ./plans/add-auth --ships 5
 ```
 
 | Option | Description |
@@ -191,8 +193,8 @@ uv run ocaptain sail ./plans/add-auth --ships 5
 Show voyage status derived from task list. Auto-selects if only one active voyage.
 
 ```bash
-uv run ocaptain status
-uv run ocaptain status voyage-abc123
+ocaptain status
+ocaptain status voyage-abc123
 ```
 
 ### `ocaptain logs <voyage_id>`
@@ -200,8 +202,8 @@ uv run ocaptain status voyage-abc123
 View aggregated logs from all ships.
 
 ```bash
-uv run ocaptain logs voyage-abc123
-uv run ocaptain logs voyage-abc123 --follow --grep "error"
+ocaptain logs voyage-abc123
+ocaptain logs voyage-abc123 --follow --grep "error"
 ```
 
 | Option | Description |
@@ -216,8 +218,8 @@ uv run ocaptain logs voyage-abc123 --follow --grep "error"
 Display task list with status, assignees, and blockers.
 
 ```bash
-uv run ocaptain tasks voyage-abc123
-uv run ocaptain tasks voyage-abc123 --status pending
+ocaptain tasks voyage-abc123
+ocaptain tasks voyage-abc123 --status pending
 ```
 
 ### `ocaptain shell <voyage_id> [ship_id]`
@@ -225,8 +227,8 @@ uv run ocaptain tasks voyage-abc123 --status pending
 Attach to a ship's tmux session to observe Claude working.
 
 ```bash
-uv run ocaptain shell voyage-abc123 ship-0      # Attach to ship's tmux
-uv run ocaptain shell voyage-abc123 ship-0 --raw  # Direct SSH
+ocaptain shell voyage-abc123 ship-0      # Attach to ship's tmux
+ocaptain shell voyage-abc123 ship-0 --raw  # Direct SSH
 ```
 
 ### `ocaptain clone [voyage_id]`
@@ -234,8 +236,8 @@ uv run ocaptain shell voyage-abc123 ship-0 --raw  # Direct SSH
 Clone the workspace from local voyage storage.
 
 ```bash
-uv run ocaptain clone                    # Auto-select if one voyage
-uv run ocaptain clone voyage-abc123 -d ./my-copy
+ocaptain clone                    # Auto-select if one voyage
+ocaptain clone voyage-abc123 -d ./my-copy
 ```
 
 ### `ocaptain sink <voyage_id>`
@@ -243,8 +245,8 @@ uv run ocaptain clone voyage-abc123 -d ./my-copy
 Destroy voyage VMs and clean up.
 
 ```bash
-uv run ocaptain sink voyage-abc123       # Destroy ships
-uv run ocaptain sink --all -f            # Destroy ALL ocaptain VMs
+ocaptain sink voyage-abc123       # Destroy ships
+ocaptain sink --all -f            # Destroy ALL ocaptain VMs
 ```
 
 | Option | Description |
@@ -257,7 +259,7 @@ uv run ocaptain sink --all -f            # Destroy ALL ocaptain VMs
 Check system prerequisites and configuration.
 
 ```bash
-uv run ocaptain doctor
+ocaptain doctor
 ```
 
 ### `ocaptain telemetry-start` / `telemetry-stop`
@@ -265,8 +267,8 @@ uv run ocaptain doctor
 Start or stop the local OTLP telemetry collector.
 
 ```bash
-uv run ocaptain telemetry-start
-uv run ocaptain telemetry-stop
+ocaptain telemetry-start
+ocaptain telemetry-stop
 ```
 
 ## Configuration

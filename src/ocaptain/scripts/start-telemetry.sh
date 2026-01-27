@@ -27,6 +27,7 @@ cat > "$CONFIG_DIR/otlp2parquet.toml" << EOF
 [server]
 listen_addr = "127.0.0.1:4318"
 log_level = "info"
+log_format = "text"
 
 [storage]
 backend = "fs"

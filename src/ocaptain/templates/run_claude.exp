@@ -5,16 +5,19 @@ spawn -noecho {*}$argv
 
 # Loop to handle multiple dialogs
 # Each dialog has 2 options - we select option 2 and continue
+# Use "2" key to directly select option 2, then Enter to confirm
 expect {
     "Yes, I accept" {
-        send "\x1b\[B"
-        sleep 0.1
+        sleep 0.3
+        send "2"
+        sleep 0.2
         send "\r"
         exp_continue
     }
     "Continue without these settings" {
-        send "\x1b\[B"
-        sleep 0.1
+        sleep 0.3
+        send "2"
+        sleep 0.2
         send "\r"
         exp_continue
     }

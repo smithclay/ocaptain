@@ -121,3 +121,47 @@ def test_boxlite_provider_wait_ready_timeout() -> None:
             # Use very short timeout for test speed
             with patch("time.sleep"):  # Skip actual sleeping
                 assert provider.wait_ready(vm, timeout=1) is False
+
+
+def test_boxlite_provider_create_starts_vm() -> None:
+    """create() should start a BoxLite VM and return VM object."""
+    from unittest.mock import AsyncMock
+
+    mock_boxlite = MagicMock()
+    mock_box = MagicMock()
+
+    # Mock async context manager using AsyncMock
+    mock_box.__aenter__ = AsyncMock(return_value=mock_box)
+    mock_box.__aexit__ = AsyncMock(return_value=None)
+
+    # Mock exec to return Tailscale IP
+    async def mock_exec(*args: str) -> MagicMock:
+        result = MagicMock()
+        if args == ("tailscale", "ip", "-4"):
+            result.stdout = "100.64.1.5\n"
+        else:
+            result.stdout = ""
+        return result
+
+    mock_box.exec = mock_exec
+    mock_boxlite.SimpleBox.return_value = mock_box
+
+    with patch.dict("sys.modules", {"boxlite": mock_boxlite}):
+        from ocaptain.providers.boxlite import BoxLiteProvider
+
+        provider = BoxLiteProvider()
+
+        # Mock _bootstrap_vm to be an async no-op
+        async def mock_bootstrap(self: object, *args: object) -> None:
+            pass
+
+        # Mock wait_ready to return True immediately
+        with (
+            patch.object(provider, "wait_ready", return_value=True),
+            patch.object(provider, "_bootstrap_vm", mock_bootstrap),
+        ):
+            vm = provider.create("test-ship", wait=True)
+
+        assert vm.name == "test-ship"
+        assert vm.id == "test-ship"
+        assert "100.64" in vm.ssh_dest or "ubuntu@" in vm.ssh_dest

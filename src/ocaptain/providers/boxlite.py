@@ -13,17 +13,18 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from fabric import Connection
 
-from ..provider import VM, Provider, register_provider
+from ..config import CONFIG, get_ssh_keypair
+from ..provider import VM, Provider, VMStatus, register_provider
 
 if TYPE_CHECKING:
-    import boxlite
+    import boxlite as boxlite_module
 
 
-def _get_boxlite() -> Any:
+def _get_boxlite() -> boxlite_module:
     """Import boxlite, raising helpful error if not installed."""
     try:
         import boxlite
@@ -43,17 +44,113 @@ class BoxLiteProvider(Provider):
     """
 
     def __init__(self) -> None:
-        self._boxes: dict[str, boxlite.SimpleBox] = {}
+        self._boxes: dict[str, object] = {}  # boxlite.SimpleBox instances
         self._vms: dict[str, VM] = {}
         self._loop = asyncio.new_event_loop()
+        self._config = CONFIG.providers.get("boxlite", {})
 
     def create(self, name: str, *, wait: bool = True) -> VM:
         """Create a new BoxLite VM."""
-        raise NotImplementedError("BoxLite create not yet implemented")
+        return self._loop.run_until_complete(self._create(name, wait))
+
+    async def _create(self, name: str, wait: bool) -> VM:
+        """Async implementation of create."""
+        boxlite = _get_boxlite()
+
+        image = self._config.get("image", "ubuntu:22.04")
+        box = boxlite.SimpleBox(image)
+        await box.__aenter__()
+
+        self._boxes[name] = box
+
+        # Bootstrap: install Tailscale, SSH, get IP
+        await self._bootstrap_vm(box, name)
+
+        # Get Tailscale IP
+        result = await box.exec("tailscale", "ip", "-4")
+        ts_ip = result.stdout.strip()
+
+        vm = VM(
+            id=name,
+            name=name,
+            ssh_dest=f"ubuntu@{ts_ip}",
+            status=VMStatus.RUNNING,
+        )
+        self._vms[name] = vm
+
+        if wait and not self.wait_ready(vm):
+            raise TimeoutError(f"VM {name} did not become SSH-accessible")
+
+        return vm
+
+    async def _bootstrap_vm(self, box: object, name: str) -> None:
+        """Bootstrap VM with Tailscale and SSH."""
+        # Use getattr for dynamic attribute access on untyped box object
+        box_exec = box.exec  # type: ignore[attr-defined]
+
+        # Install essentials
+        await box_exec("apt-get", "update")
+        await box_exec("apt-get", "install", "-y", "openssh-server", "curl", "sudo")
+
+        # Configure sshd on port 2222
+        await box_exec("mkdir", "-p", "/run/sshd")
+        await box_exec("sed", "-i", "s/#Port 22/Port 2222/", "/etc/ssh/sshd_config")
+        await box_exec("/usr/sbin/sshd")
+
+        # Create ubuntu user if needed and setup SSH
+        await box_exec("bash", "-c", "id ubuntu || useradd -m -s /bin/bash ubuntu")
+        await box_exec("bash", "-c", "echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers")
+
+        # Inject ocaptain SSH keypair
+        _, public_key = get_ssh_keypair()
+        await box_exec("mkdir", "-p", "/home/ubuntu/.ssh")
+        pub_key = public_key.strip()
+        await box_exec("bash", "-c", f"echo '{pub_key}' >> /home/ubuntu/.ssh/authorized_keys")
+        await box_exec("chown", "-R", "ubuntu:ubuntu", "/home/ubuntu/.ssh")
+        await box_exec("chmod", "700", "/home/ubuntu/.ssh")
+        await box_exec("chmod", "600", "/home/ubuntu/.ssh/authorized_keys")
+
+        # Install Tailscale
+        await box_exec("bash", "-c", "curl -fsSL https://tailscale.com/install.sh | sh")
+
+        # Start tailscaled with in-memory state (ephemeral)
+        await box_exec("bash", "-c", "tailscaled --state=mem: &")
+        await box_exec("sleep", "2")  # Give tailscaled time to start
+
+        # Join tailnet
+        oauth_secret = CONFIG.tailscale.oauth_secret
+        if not oauth_secret:
+            raise ValueError("Tailscale OAuth secret required. Set OCAPTAIN_TAILSCALE_OAUTH_SECRET")
+
+        ship_tag = CONFIG.tailscale.ship_tag
+        auth_key = f"{oauth_secret}?ephemeral=true&preauthorized=true"
+        await box_exec(
+            "tailscale",
+            "up",
+            f"--authkey={auth_key}",
+            f"--hostname={name}",
+            f"--advertise-tags={ship_tag}",
+        )
 
     def destroy(self, vm_id: str) -> None:
         """Destroy a BoxLite VM."""
-        raise NotImplementedError("BoxLite destroy not yet implemented")
+        if vm_id not in self._boxes:
+            return
+        self._loop.run_until_complete(self._destroy(vm_id))
+
+    async def _destroy(self, vm_id: str) -> None:
+        """Async implementation of destroy."""
+        import contextlib
+
+        box = self._boxes[vm_id]
+        box_exec = box.exec  # type: ignore[attr-defined]
+
+        with contextlib.suppress(Exception):
+            await box_exec("tailscale", "logout")
+
+        await box.__aexit__(None, None, None)  # type: ignore[attr-defined]
+        del self._boxes[vm_id]
+        del self._vms[vm_id]
 
     def get(self, vm_id: str) -> VM | None:
         """Get VM by ID."""

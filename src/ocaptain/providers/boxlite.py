@@ -110,38 +110,36 @@ class BoxLiteProvider(Provider):
 
     async def _bootstrap_vm(self, box: object, name: str) -> None:
         """Bootstrap VM with Tailscale and SSH."""
-        # Use getattr for dynamic attribute access on untyped box object
-        box_exec = box.exec  # type: ignore[attr-defined]
+        run = box.exec  # type: ignore[attr-defined]
 
         # Install essentials
-        await box_exec("apt-get", "update")
-        await box_exec("apt-get", "install", "-y", "openssh-server", "curl", "sudo")
+        await run("apt-get", "update")
+        await run("apt-get", "install", "-y", "openssh-server", "curl", "sudo")
 
         # Configure sshd on port 2222
-        await box_exec("mkdir", "-p", "/run/sshd")
-        await box_exec("sed", "-i", "s/#Port 22/Port 2222/", "/etc/ssh/sshd_config")
-        await box_exec("/usr/sbin/sshd")
+        await run("mkdir", "-p", "/run/sshd")
+        await run("sed", "-i", "s/#Port 22/Port 2222/", "/etc/ssh/sshd_config")
+        await run("/usr/sbin/sshd")
 
         # Create ubuntu user if needed and setup SSH
-        await box_exec("bash", "-c", "id ubuntu || useradd -m -s /bin/bash ubuntu")
-        await box_exec("bash", "-c", "echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers")
+        await run("bash", "-c", "id ubuntu || useradd -m -s /bin/bash ubuntu")
+        await run("bash", "-c", "echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers")
 
         # Inject ocaptain SSH keypair
         _, public_key = get_ssh_keypair()
-        await box_exec("mkdir", "-p", "/home/ubuntu/.ssh")
-        pub_key = public_key.strip()
-        ssh_key_cmd = f"echo {shlex.quote(pub_key)} >> /home/ubuntu/.ssh/authorized_keys"
-        await box_exec("bash", "-c", ssh_key_cmd)
-        await box_exec("chown", "-R", "ubuntu:ubuntu", "/home/ubuntu/.ssh")
-        await box_exec("chmod", "700", "/home/ubuntu/.ssh")
-        await box_exec("chmod", "600", "/home/ubuntu/.ssh/authorized_keys")
+        await run("mkdir", "-p", "/home/ubuntu/.ssh")
+        ssh_key_cmd = f"echo {shlex.quote(public_key.strip())} >> /home/ubuntu/.ssh/authorized_keys"
+        await run("bash", "-c", ssh_key_cmd)
+        await run("chown", "-R", "ubuntu:ubuntu", "/home/ubuntu/.ssh")
+        await run("chmod", "700", "/home/ubuntu/.ssh")
+        await run("chmod", "600", "/home/ubuntu/.ssh/authorized_keys")
 
         # Install Tailscale
-        await box_exec("bash", "-c", "curl -fsSL https://tailscale.com/install.sh | sh")
+        await run("bash", "-c", "curl -fsSL https://tailscale.com/install.sh | sh")
 
         # Start tailscaled with in-memory state (ephemeral)
-        await box_exec("bash", "-c", "tailscaled --state=mem: &")
-        await box_exec("sleep", "2")  # Give tailscaled time to start
+        await run("bash", "-c", "tailscaled --state=mem: &")
+        await run("sleep", "2")  # Give tailscaled time to start
 
         # Join tailnet
         oauth_secret = CONFIG.tailscale.oauth_secret
@@ -150,7 +148,7 @@ class BoxLiteProvider(Provider):
 
         ship_tag = CONFIG.tailscale.ship_tag
         auth_key = f"{oauth_secret}?ephemeral=true&preauthorized=true"
-        await box_exec(
+        await run(
             "tailscale",
             "up",
             f"--authkey={auth_key}",
@@ -159,7 +157,7 @@ class BoxLiteProvider(Provider):
         )
 
         # Install Claude Code
-        await box_exec("bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash")
+        await run("bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash")
 
     def destroy(self, vm_id: str) -> None:
         """Destroy a BoxLite VM."""
@@ -170,10 +168,10 @@ class BoxLiteProvider(Provider):
     async def _destroy(self, vm_id: str) -> None:
         """Async implementation of destroy."""
         box = self._boxes[vm_id]
-        box_exec = box.exec  # type: ignore[attr-defined]
+        run = box.exec  # type: ignore[attr-defined]
 
         try:
-            await box_exec("tailscale", "logout")
+            await run("tailscale", "logout")
         except Exception as e:
             logger.warning("Failed to logout from Tailscale during VM %s destruction: %s", vm_id, e)
 
@@ -187,10 +185,10 @@ class BoxLiteProvider(Provider):
 
     def list(self, prefix: str | None = None) -> list[VM]:
         """List VMs, optionally filtered by name prefix."""
-        vms = list(self._vms.values())
+        vms = self._vms.values()
         if prefix:
-            vms = [v for v in vms if v.name.startswith(prefix)]
-        return vms
+            return [v for v in vms if v.name.startswith(prefix)]
+        return list(vms)
 
     def wait_ready(self, vm: VM, timeout: int = 300) -> bool:
         """Wait for VM to be SSH-accessible via Tailscale."""

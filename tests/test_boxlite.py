@@ -74,3 +74,50 @@ def test_boxlite_provider_get_returns_vm_when_found() -> None:
         provider._vms["test-vm"] = vm
 
         assert provider.get("test-vm") == vm
+
+
+def test_boxlite_provider_wait_ready_success() -> None:
+    """wait_ready() should return True when SSH is accessible."""
+    with patch.dict("sys.modules", {"boxlite": MagicMock()}):
+        from ocaptain.provider import VM, VMStatus
+        from ocaptain.providers.boxlite import BoxLiteProvider
+
+        provider = BoxLiteProvider()
+        vm = VM(
+            id="test-vm",
+            name="test-vm",
+            ssh_dest="ubuntu@100.64.1.1",
+            status=VMStatus.RUNNING,
+        )
+
+        with patch("ocaptain.providers.boxlite.Connection") as mock_conn:
+            mock_connection = MagicMock()
+            mock_conn.return_value.__enter__ = MagicMock(return_value=mock_connection)
+            mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+            mock_connection.run.return_value = MagicMock(stdout="ready")
+
+            assert provider.wait_ready(vm, timeout=5) is True
+
+
+def test_boxlite_provider_wait_ready_timeout() -> None:
+    """wait_ready() should return False on timeout."""
+    with patch.dict("sys.modules", {"boxlite": MagicMock()}):
+        from ocaptain.provider import VM, VMStatus
+        from ocaptain.providers.boxlite import BoxLiteProvider
+
+        provider = BoxLiteProvider()
+        vm = VM(
+            id="test-vm",
+            name="test-vm",
+            ssh_dest="ubuntu@100.64.1.1",
+            status=VMStatus.RUNNING,
+        )
+
+        with patch("ocaptain.providers.boxlite.Connection") as mock_conn:
+            mock_conn.return_value.__enter__ = MagicMock(
+                side_effect=Exception("Connection refused")
+            )
+
+            # Use very short timeout for test speed
+            with patch("time.sleep"):  # Skip actual sleeping
+                assert provider.wait_ready(vm, timeout=1) is False

@@ -12,7 +12,10 @@ Requirements:
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TYPE_CHECKING, Any
+
+from fabric import Connection
 
 from ..provider import VM, Provider, register_provider
 
@@ -65,4 +68,12 @@ class BoxLiteProvider(Provider):
 
     def wait_ready(self, vm: VM, timeout: int = 300) -> bool:
         """Wait for VM to be SSH-accessible via Tailscale."""
-        raise NotImplementedError("BoxLite wait_ready not yet implemented")
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                with Connection(vm.ssh_dest, connect_timeout=5) as c:
+                    c.run("echo ready", hide=True)
+                return True
+            except Exception:
+                time.sleep(2)
+        return False

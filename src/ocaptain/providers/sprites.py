@@ -7,9 +7,9 @@ Unlike exe.dev, sprites don't have native SSH access, so we use:
 - Tailscale for networking between ships and laptop
 """
 
+import logging
 import re
 import subprocess  # nosec: B404
-import time
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -17,6 +17,9 @@ from typing import BinaryIO
 
 from ..config import CONFIG, get_ssh_keypair
 from ..provider import VM, Provider, VMStatus, register_provider
+from .common import install_claude_code, poll_until_ready, run_cli_command, setup_ssh_keys
+
+logger = logging.getLogger(__name__)
 
 
 def _get_sprites_org() -> str:
@@ -33,16 +36,7 @@ def _get_sprites_org() -> str:
 
 def _run_sprite(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Run a sprite CLI command."""
-    cmd = ["sprite", *args]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec: B603, B607
-    if result.returncode != 0 and check:
-        import sys
-
-        print(f"sprite command failed: {' '.join(args)}", file=sys.stderr)
-        print(f"stderr: {result.stderr}", file=sys.stderr)
-        print(f"stdout: {result.stdout}", file=sys.stderr)
-        result.check_returncode()
-    return result
+    return run_cli_command(["sprite", *args], check=check, description="sprite command")
 
 
 @dataclass
@@ -204,28 +198,8 @@ class SpritesProvider(Provider):
         private_key, public_key = get_ssh_keypair()
 
         with self.get_connection(vm) as c:
-            # Get home directory
-            result = c.run("echo $HOME", hide=True)
-            home = result.stdout.strip()
-            ssh_dir = f"{home}/.ssh"
-
-            # Ensure .ssh directory exists with correct permissions
-            c.run(f"mkdir -p {ssh_dir} && chmod 700 {ssh_dir}")
-
-            # Write private key
-            c.put(BytesIO(private_key.encode()), f"{ssh_dir}/id_ed25519")
-            c.run(f"chmod 600 {ssh_dir}/id_ed25519")
-
-            # Append public key to authorized_keys
-            c.put(BytesIO(public_key.encode()), f"{ssh_dir}/ocaptain_key.pub")
-            c.run(f"cat {ssh_dir}/ocaptain_key.pub >> {ssh_dir}/authorized_keys")
-            c.run(f"chmod 600 {ssh_dir}/authorized_keys")
-
-            # Install Claude Code
-            c.run(
-                "curl -fsSL https://claude.ai/install.sh | bash",
-                hide=True,
-            )
+            setup_ssh_keys(c, private_key, public_key)
+            install_claude_code(c)
 
     def destroy(self, vm_id: str) -> None:
         """Destroy a sprite VM."""
@@ -264,41 +238,20 @@ class SpritesProvider(Provider):
 
     def wait_ready(self, vm: VM, timeout: int = 300) -> bool:
         """Poll until sprite is accessible via exec."""
-        import logging
 
-        logger = logging.getLogger(__name__)
-        start = time.time()
+        def check_sprite_exec() -> bool:
+            result = subprocess.run(  # nosec: B603, B607
+                ["sprite", "exec", "-o", self.org, "-s", vm.name, "echo", "ready"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            return result.returncode == 0 and "ready" in result.stdout
 
-        while time.time() - start < timeout:
-            try:
-                result = subprocess.run(  # nosec: B603, B607
-                    [
-                        "sprite",
-                        "exec",
-                        "-o",
-                        self.org,
-                        "-s",
-                        vm.name,
-                        "echo",
-                        "ready",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    check=False,
-                )
-                if result.returncode == 0 and "ready" in result.stdout:
-                    return True
-            except KeyboardInterrupt:
-                raise
-            except subprocess.TimeoutExpired:
-                logger.debug("Sprite %s exec timed out, retrying...", vm.name)
-            except Exception as e:
-                logger.debug("Sprite %s exec failed: %s, retrying...", vm.name, e)
-
-            time.sleep(5)
-
-        return False
+        return poll_until_ready(
+            check_sprite_exec, timeout=timeout, interval=5, vm=vm, logger=logger
+        )
 
     def get_connection(self, vm: VM) -> SpriteConnection:
         """Get a SpriteConnection for the VM."""

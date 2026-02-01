@@ -131,6 +131,11 @@ def load_config() -> OcaptainConfig:
     return OcaptainConfig(**data)
 
 
+def get_ssh_private_key_path() -> Path:
+    """Return the path to the ocaptain SSH private key."""
+    return Path.home() / ".config" / "ocaptain" / "id_ed25519"
+
+
 def get_ssh_keypair() -> tuple[str, str]:
     """Get or create the ocaptain SSH keypair for VM-to-VM communication.
 

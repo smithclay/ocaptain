@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 
 from fabric import Connection
 
-from ..config import CONFIG, get_ssh_keypair
+from ..config import CONFIG, get_ssh_keypair, get_ssh_private_key_path
 from ..provider import VM, Provider, VMStatus, register_provider
 
 logger = logging.getLogger(__name__)
@@ -239,10 +239,9 @@ class BoxLiteProvider(Provider):
     async def _destroy(self, vm_id: str) -> None:
         """Async implementation of destroy."""
         box = self._boxes[vm_id]
-        run = box.exec  # type: ignore[attr-defined]
 
         try:
-            await run(
+            await box.exec(  # type: ignore[attr-defined]
                 "bash", "-c", "/usr/bin/tailscale --socket=/run/tailscale/tailscaled.sock logout"
             )
         except Exception as e:
@@ -265,16 +264,9 @@ class BoxLiteProvider(Provider):
 
     def wait_ready(self, vm: VM, timeout: int = 300) -> bool:
         """Wait for VM to be SSH-accessible via Tailscale."""
-        from pathlib import Path
-
-        from ..config import get_ssh_keypair
-
         get_ssh_keypair()  # Ensure key exists
-        private_key_path = str(Path.home() / ".config" / "ocaptain" / "id_ed25519")
-
-        # BoxLite runs sshd on port 2222 (ocaptain standard)
         connect_kwargs = {
-            "key_filename": private_key_path,
+            "key_filename": str(get_ssh_private_key_path()),
             "look_for_keys": False,
         }
 

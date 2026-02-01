@@ -110,7 +110,22 @@ def get_connection(vm: VM, provider: Provider) -> "Generator[Any, None, None]":
         else:
             raise ValueError(f"Sprite VM requires SpritesProvider, got {type(provider)}")
     else:
+        from pathlib import Path
+
         from fabric import Connection
 
-        with Connection(vm.ssh_dest) as c:
-            yield c
+        from .config import CONFIG, get_ssh_keypair
+
+        # BoxLite uses port 2222 and needs explicit key
+        if CONFIG.provider == "boxlite":
+            get_ssh_keypair()  # Ensure key exists
+            private_key_path = str(Path.home() / ".config" / "ocaptain" / "id_ed25519")
+            connect_kwargs = {
+                "key_filename": private_key_path,
+                "look_for_keys": False,
+            }
+            with Connection(vm.ssh_dest, port=2222, connect_kwargs=connect_kwargs) as c:
+                yield c
+        else:
+            with Connection(vm.ssh_dest) as c:
+                yield c

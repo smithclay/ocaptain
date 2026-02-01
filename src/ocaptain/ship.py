@@ -11,14 +11,26 @@ from .provider import VM, get_connection, get_provider
 from .voyage import Voyage
 
 
-def _bootstrap_tailscale(c: Connection, ship_name: str, oauth_secret: str, ship_tag: str) -> str:
+def _bootstrap_tailscale(
+    c: Connection, ship_name: str, oauth_secret: str, ship_tag: str, *, skip_install: bool = False
+) -> str:
     """Install Tailscale and join tailnet with ACL isolation. Returns ship's Tailscale IP.
 
     Ships are:
     - Ephemeral: Auto-removed when destroyed
     - Preauthorized: No manual approval needed
     - Tagged: Isolated by ACL policy (can only reach laptop's OTLP port)
+
+    Args:
+        skip_install: If True, skip Tailscale installation (already done by provider).
+                     Used by BoxLite which bootstraps Tailscale without systemd.
     """
+    if skip_install:
+        # BoxLite: Tailscale already installed and running via provider bootstrap
+        # Just get the IP - tailscale is already connected
+        result = c.run("tailscale ip -4", hide=True)
+        return str(result.stdout.strip())
+
     # Install Tailscale
     c.run(
         "curl -fsSL https://tailscale.com/install.sh | sh",
@@ -86,8 +98,14 @@ def bootstrap_ship(
         home = c.run("echo $HOME", hide=True).stdout.strip()
 
         # 2. Bootstrap Tailscale with ACL tag isolation
+        # BoxLite handles Tailscale in provider bootstrap (no systemd available)
+        skip_ts_install = CONFIG.provider == "boxlite"
         ship_ts_ip = _bootstrap_tailscale(
-            c, ship_name, CONFIG.tailscale.oauth_secret, CONFIG.tailscale.ship_tag
+            c,
+            ship_name,
+            CONFIG.tailscale.oauth_secret,
+            CONFIG.tailscale.ship_tag,
+            skip_install=skip_ts_install,
         )
 
         # 3. Create directories for Mutagen sync target
@@ -145,6 +163,8 @@ def bootstrap_ship(
             c.run("gh auth setup-git", hide=True)
 
         # 8. Install tmux and expect for autonomous Claude sessions
-        c.run("sudo apt-get update -qq && sudo apt-get install -y -qq tmux expect", hide=True)
+        # BoxLite installs these in provider bootstrap to avoid apt lock conflicts
+        if CONFIG.provider != "boxlite":
+            c.run("sudo apt-get update -qq && sudo apt-get install -y -qq tmux expect", hide=True)
 
     return ship, ship_ts_ip

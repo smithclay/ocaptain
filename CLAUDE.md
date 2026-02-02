@@ -31,13 +31,21 @@ Always use `uv run` to execute Python scripts and CLI commands (e.g., `uv run oc
 - `ocaptain telemetry-start` - Start OTLP collector
 - `ocaptain telemetry-stop` - Stop OTLP collector
 
-### sprites.dev Commands
+### VM Provider Commands
 
-Ships run on sprites.dev. Use `sprite` CLI for debugging:
+Ships run on sprites.dev (fly.io) or exe.dev. Use the appropriate CLI for debugging:
 
+**sprites.dev:**
 ```bash
 sprite list -o <org>           # List sprites
 sprite exec -o <org> -s <name> # Run command on sprite
+```
+
+**exe.dev:**
+```bash
+ssh <ship-name>.exe.xyz        # SSH via exe.dev proxy
+# Or via Tailscale (after ship joins tailnet):
+ssh exedev@<tailscale-ip> -p 2222
 ```
 
 ## Architecture

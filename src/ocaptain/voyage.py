@@ -305,10 +305,23 @@ def sail_empty(
     # 3. Bootstrap single ship
     ship_vm, ship_ts_ip = bootstrap_ship(voyage, 0, tokens, telemetry)
 
-    # 4. Clone repository on ship (if provided)
+    # 4. Write and copy stop hook to ship
+    hook_content = render_stop_hook()
+    (voyage_dir / "on-stop.sh").write_text(hook_content)
+    (voyage_dir / "on-stop.sh").chmod(0o755)
+
+    provider = get_provider()
+    _copy_file_to_ship(
+        voyage_dir / "on-stop.sh",
+        f"{_get_remote_home(ship_vm)}/.ocaptain/hooks/on-stop.sh",
+        ship_vm,
+        ship_ts_ip,
+        provider,
+    )
+
+    # 5. Clone repository on ship (if provided)
     has_workspace = False
     if repo:
-        provider = get_provider()
         remote_home = _get_remote_home(ship_vm)
 
         with get_connection(ship_vm, provider) as c:
@@ -319,7 +332,7 @@ def sail_empty(
             )
         has_workspace = True
 
-    # 5. Launch Claude interactively
+    # 6. Launch Claude interactively
     oauth_token = tokens.get("CLAUDE_CODE_OAUTH_TOKEN")
     if not oauth_token:
         raise ValueError(

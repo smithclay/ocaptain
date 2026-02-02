@@ -266,6 +266,89 @@ def sail(
     return voyage
 
 
+def sail_empty(
+    repo: str | None = None,
+    tokens: dict[str, str] | None = None,
+    telemetry: bool = True,
+) -> Voyage:
+    """Launch a single-ship voyage without a plan.
+
+    1. Set up local voyage directory
+    2. Clone repository locally (if repo provided)
+    3. Bootstrap single ship VM with Tailscale
+    4. Start Mutagen sync (if repo provided)
+    5. Launch Claude interactively in tmux
+    """
+    from .config import CONFIG
+    from .local_storage import setup_local_voyage
+    from .mutagen import create_sync
+    from .ship import bootstrap_ship
+    from .tmux import launch_interactive_ship
+
+    if tokens is None:
+        tokens = {}
+
+    # Create voyage with placeholder values for empty sail
+    prompt = "Interactive session"
+    voyage = Voyage.create(prompt, repo or "local", ships=1)
+
+    # Verify tailscale is ready
+    if not CONFIG.tailscale.ip:
+        raise RuntimeError("Tailscale IP not detected. Is Tailscale running?")
+    if not CONFIG.tailscale.oauth_secret:
+        raise RuntimeError("OCAPTAIN_TAILSCALE_OAUTH_SECRET not set")
+
+    # 1. Set up local voyage directory
+    voyage_dir = setup_local_voyage(voyage.id, voyage.task_list_id)
+
+    # 2. Clone repository locally (if provided)
+    has_workspace = False
+    if repo:
+        import subprocess  # nosec: B404
+
+        subprocess.run(  # nosec: B603, B607
+            ["gh", "repo", "clone", repo, str(voyage_dir / "workspace")],
+            check=True,
+        )
+        subprocess.run(  # nosec: B603, B607
+            ["git", "-C", str(voyage_dir / "workspace"), "checkout", "-b", voyage.branch],
+            check=True,
+        )
+        has_workspace = True
+
+    # 3. Write voyage.json locally
+    (voyage_dir / "voyage.json").write_text(voyage.to_json())
+
+    # 4. Bootstrap single ship
+    ship_vm, ship_ts_ip = bootstrap_ship(voyage, 0, tokens, telemetry)
+
+    # 5. Start Mutagen sync (if repo provided)
+    if has_workspace:
+        remote_user = _get_remote_user(ship_vm)
+        remote_home = _get_remote_home(ship_vm)
+        session_name = f"{voyage.id}-ship-0"
+
+        create_sync(
+            local_path=voyage_dir / "workspace",
+            remote_user=remote_user,
+            remote_host=ship_ts_ip,
+            remote_path=f"{remote_home}/voyage/workspace",
+            session_name=f"{session_name}-workspace",
+            extra_ignores=[".claude"],
+        )
+
+    # 6. Launch Claude interactively
+    oauth_token = tokens.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if not oauth_token:
+        raise ValueError(
+            "CLAUDE_CODE_OAUTH_TOKEN not provided - cannot launch without authentication"
+        )
+
+    launch_interactive_ship(ship_vm, "ship-0", oauth_token, has_workspace)
+
+    return voyage
+
+
 def load_voyage(voyage_id: str) -> Voyage:
     """Load voyage from local storage."""
     from .local_storage import get_voyage_dir

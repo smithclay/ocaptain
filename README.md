@@ -29,6 +29,12 @@ Provisions a fleet of VMs on sprites.dev (fly.io) or exe.dev, each running an au
 You (local) → ocaptain sail → sprites.dev VMs → Ships claim tasks → Code syncs back
 ```
 
+Or launch a single ship for interactive use—no plan required:
+
+```
+You (local) → ocaptain sail --repo owner/repo → Single VM → Claude ready for commands
+```
+
 ## Why?
 
 - Deploy parallel, autonomous Claude Code instances with one command
@@ -175,17 +181,23 @@ flowchart TB
 
 ## CLI Reference
 
-### `ocaptain sail <plan>`
+### `ocaptain sail [plan]`
 
-Launch a new voyage from a plan directory.
+Launch a new voyage from a plan directory, or a single interactive ship without a plan.
 
 ```bash
+# With a plan (multi-ship fleet)
 ocaptain sail ./plans/add-auth --ships 5
+
+# Without a plan (single interactive ship)
+ocaptain sail                              # Bare ship, no repo
+ocaptain sail --repo owner/repo            # Ship with repo cloned
 ```
 
 | Option | Description |
 |--------|-------------|
-| `--ships, -n` | Override recommended ship count |
+| `--repo, -r` | Repository to clone (empty sail only) |
+| `--ships, -n` | Override recommended ship count (ignored for empty sail) |
 | `--no-telemetry` | Disable OTLP telemetry collection |
 
 ### `ocaptain status [voyage_id]`

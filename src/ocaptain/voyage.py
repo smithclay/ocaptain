@@ -274,14 +274,12 @@ def sail_empty(
     """Launch a single-ship voyage without a plan.
 
     1. Set up local voyage directory
-    2. Clone repository locally (if repo provided)
-    3. Bootstrap single ship VM with Tailscale
-    4. Start Mutagen sync (if repo provided)
-    5. Launch Claude interactively in tmux
+    2. Bootstrap single ship VM with Tailscale
+    3. Clone repository on ship (if repo provided)
+    4. Launch Claude interactively in tmux
     """
     from .config import CONFIG
     from .local_storage import setup_local_voyage
-    from .mutagen import create_sync
     from .ship import bootstrap_ship
     from .tmux import launch_interactive_ship
 
@@ -301,43 +299,27 @@ def sail_empty(
     # 1. Set up local voyage directory
     voyage_dir = setup_local_voyage(voyage.id, voyage.task_list_id)
 
-    # 2. Clone repository locally (if provided)
-    has_workspace = False
-    if repo:
-        import subprocess  # nosec: B404
-
-        subprocess.run(  # nosec: B603, B607
-            ["gh", "repo", "clone", repo, str(voyage_dir / "workspace")],
-            check=True,
-        )
-        subprocess.run(  # nosec: B603, B607
-            ["git", "-C", str(voyage_dir / "workspace"), "checkout", "-b", voyage.branch],
-            check=True,
-        )
-        has_workspace = True
-
-    # 3. Write voyage.json locally
+    # 2. Write voyage.json locally
     (voyage_dir / "voyage.json").write_text(voyage.to_json())
 
-    # 4. Bootstrap single ship
+    # 3. Bootstrap single ship
     ship_vm, ship_ts_ip = bootstrap_ship(voyage, 0, tokens, telemetry)
 
-    # 5. Start Mutagen sync (if repo provided)
-    if has_workspace:
-        remote_user = _get_remote_user(ship_vm)
+    # 4. Clone repository on ship (if provided)
+    has_workspace = False
+    if repo:
+        provider = get_provider()
         remote_home = _get_remote_home(ship_vm)
-        session_name = f"{voyage.id}-ship-0"
 
-        create_sync(
-            local_path=voyage_dir / "workspace",
-            remote_user=remote_user,
-            remote_host=ship_ts_ip,
-            remote_path=f"{remote_home}/voyage/workspace",
-            session_name=f"{session_name}-workspace",
-            extra_ignores=[".claude"],
-        )
+        with get_connection(ship_vm, provider) as c:
+            c.run(f"gh repo clone {repo} {remote_home}/voyage/workspace", hide=True)
+            c.run(
+                f"git -C {remote_home}/voyage/workspace checkout -b {voyage.branch}",
+                hide=True,
+            )
+        has_workspace = True
 
-    # 6. Launch Claude interactively
+    # 5. Launch Claude interactively
     oauth_token = tokens.get("CLAUDE_CODE_OAUTH_TOKEN")
     if not oauth_token:
         raise ValueError(

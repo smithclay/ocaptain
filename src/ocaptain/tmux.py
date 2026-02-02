@@ -46,6 +46,19 @@ def _build_claude_command(ship_id: str, voyage: Voyage, oauth_token: str) -> str
     )
 
 
+def _build_interactive_claude_command(ship_id: str, oauth_token: str, has_workspace: bool) -> str:
+    """Build command for interactive Claude session (no plan)."""
+    cd_cmd = "cd ~/voyage/workspace && " if has_workspace else ""
+    return (
+        f"set -o pipefail && "
+        f"{cd_cmd}"
+        f"export LANG=C.utf8 LC_CTYPE=C.utf8 LC_ALL=C.utf8 && "
+        f"export CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(oauth_token)} && "
+        f"claude --dangerously-skip-permissions ; "
+        f"exec bash"
+    )
+
+
 def start_claude_on_ship(ship: VM, ship_id: str, voyage: Voyage, oauth_token: str) -> None:
     """Start Claude in a tmux session on the ship (runs autonomously)."""
     claude_cmd = _build_claude_command(ship_id, voyage, oauth_token)
@@ -147,3 +160,38 @@ def launch_fleet(
             start_claude_on_sprite(ship, ship_id, voyage, oauth_token)
         else:
             start_claude_on_ship(ship, ship_id, voyage, oauth_token)
+
+
+def launch_interactive_ship(
+    ship: VM,
+    ship_id: str,
+    oauth_token: str,
+    has_workspace: bool,
+) -> None:
+    """Start Claude interactively on a single ship (no plan).
+
+    Claude runs inside tmux on the ship, surviving laptop disconnection.
+    Use `ocaptain shell` to attach and interact.
+    """
+    claude_cmd = _build_interactive_claude_command(ship_id, oauth_token, has_workspace)
+    tmux_cmd = f"tmux new-session -d -s claude {shlex.quote(claude_cmd)}"
+
+    if is_sprite_vm(ship):
+        org = _get_sprites_org()
+        subprocess.run(  # nosec B603 B607
+            ["sprite", "exec", "-o", org, "-s", ship.name, "bash", "-c", tmux_cmd],
+            check=True,
+        )
+    else:
+        subprocess.run(  # nosec B603 B607
+            [
+                "ssh",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                ship.ssh_dest,
+                tmux_cmd,
+            ],
+            check=True,
+        )

@@ -10,9 +10,14 @@ Always use `uv run` to execute Python scripts and CLI commands (e.g., `uv run oc
 
 ## CLI Commands
 
-- `ocaptain sail <plan-dir>` - Launch a voyage from a plan directory
-  - `--ships, -n` - Override ship count
+- `ocaptain sail [plan-dir]` - Launch a voyage from a plan directory, or a single interactive ship
+  - `--repo, -r` - Repository to clone (empty sail only)
+  - `--ships, -n` - Override ship count (ignored for empty sail)
   - `--no-telemetry` - Disable OTLP telemetry
+  - Examples:
+    - `ocaptain sail ./plans/my-plan` - Multi-ship fleet with plan
+    - `ocaptain sail` - Single interactive ship, no repo
+    - `ocaptain sail --repo owner/repo` - Single ship with repo cloned
 - `ocaptain status [voyage_id]` - Show voyage status
 - `ocaptain logs <voyage_id>` - View aggregated logs
 - `ocaptain tasks <voyage_id>` - Show task list
@@ -26,13 +31,21 @@ Always use `uv run` to execute Python scripts and CLI commands (e.g., `uv run oc
 - `ocaptain telemetry-start` - Start OTLP collector
 - `ocaptain telemetry-stop` - Stop OTLP collector
 
-### sprites.dev Commands
+### VM Provider Commands
 
-Ships run on sprites.dev. Use `sprite` CLI for debugging:
+Ships run on sprites.dev (fly.io) or exe.dev. Use the appropriate CLI for debugging:
 
+**sprites.dev:**
 ```bash
 sprite list -o <org>           # List sprites
 sprite exec -o <org> -s <name> # Run command on sprite
+```
+
+**exe.dev:**
+```bash
+ssh <ship-name>.exe.xyz        # SSH via exe.dev proxy
+# Or via Tailscale (after ship joins tailnet):
+ssh exedev@<tailscale-ip> -p 2222
 ```
 
 ## Architecture

@@ -27,11 +27,17 @@ console = Console()
 
 @app.command()
 def sail(
-    plan: str = typer.Argument(..., help="Path to voyage plan directory"),
+    plan: str = typer.Argument(None, help="Path to voyage plan directory"),
+    repo: str = typer.Option(None, "--repo", "-r", help="Repository to clone (empty sail only)"),
     ships: int = typer.Option(None, "--ships", "-n", help="Override recommended ship count"),
     no_telemetry: bool = typer.Option(False, "--no-telemetry", help="Disable OTLP telemetry"),
 ) -> None:
-    """Launch a new voyage from a plan directory."""
+    """Launch a new voyage from a plan directory, or an empty ship for interactive use."""
+    # Empty sail mode: no plan provided
+    if plan is None:
+        _sail_empty(repo=repo, no_telemetry=no_telemetry)
+        return
+
     plan_dir = Path(plan)
     if not plan_dir.is_dir():
         console.print(f"[red]Error:[/red] Plan directory not found: {plan}")
@@ -45,13 +51,17 @@ def sail(
             console.print(f"  - {error}")
         raise typer.Exit(1)
 
+    # Warn if --repo was provided with a plan (ignored)
+    if repo:
+        console.print("[yellow]Warning:[/yellow] --repo is ignored when a plan is provided")
+
     # Load voyage.json
     voyage_json = json.loads((plan_dir / "voyage.json").read_text())
     tasks_dir = plan_dir / "tasks"
     task_count = len(list(tasks_dir.glob("*.json")))
 
     # Get values from voyage.json
-    repo = voyage_json["repo"]
+    plan_repo = voyage_json["repo"]
     if not ships:
         ships = voyage_json.get("recommended_ships", 3)
 
@@ -69,7 +79,7 @@ def sail(
     telemetry = not no_telemetry and CONFIG.telemetry_enabled
 
     console.print(f"[dim]Plan loaded: {plan_dir.name}[/dim]")
-    console.print(f"[dim]  Repo: {repo}[/dim]")
+    console.print(f"[dim]  Repo: {plan_repo}[/dim]")
     console.print(f"[dim]  Tasks: {task_count} (pre-created)[/dim]")
     console.print(f"[dim]  Ships: {ships}[/dim]")
     console.print(f"[dim]  Telemetry: {'enabled' if telemetry else 'disabled'}[/dim]")
@@ -84,7 +94,7 @@ def sail(
     # Validate repository access before provisioning VMs
     with console.status("Validating repository access..."):
         try:
-            validate_repo_access(repo, tokens.get("GH_TOKEN"))
+            validate_repo_access(plan_repo, tokens.get("GH_TOKEN"))
         except ValueError as e:
             console.print(f"[red]Error:[/red] {e}")
             raise typer.Exit(1) from None
@@ -92,7 +102,7 @@ def sail(
     with console.status(f"Launching voyage with {ships} ships..."):
         voyage = voyage_mod.sail(
             prompt,
-            repo,
+            plan_repo,
             ships,
             tokens,
             spec_content=spec_content,
@@ -108,6 +118,48 @@ def sail(
     console.print(f"  Plan: {Path(plan).name}")
     console.print("\nShips are now autonomous. Check status with:")
     console.print(f"  [dim]ocaptain status {voyage.id}[/dim]")
+
+
+def _sail_empty(repo: str | None, no_telemetry: bool) -> None:
+    """Launch a single ship for interactive use (no plan)."""
+    telemetry = not no_telemetry and CONFIG.telemetry_enabled
+
+    if repo:
+        console.print(f"[dim]Launching empty sail with repo: {repo}[/dim]")
+    else:
+        console.print("[dim]Launching empty sail (no repo)[/dim]")
+    console.print(f"[dim]  Telemetry: {'enabled' if telemetry else 'disabled'}[/dim]")
+
+    # Load and validate tokens
+    try:
+        tokens = load_tokens()
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1) from None
+
+    # Validate repository access if repo provided
+    if repo:
+        with console.status("Validating repository access..."):
+            try:
+                validate_repo_access(repo, tokens.get("GH_TOKEN"))
+            except ValueError as e:
+                console.print(f"[red]Error:[/red] {e}")
+                raise typer.Exit(1) from None
+
+    with console.status("Provisioning ship..."):
+        voyage = voyage_mod.sail_empty(
+            repo=repo,
+            tokens=tokens,
+            telemetry=telemetry,
+        )
+
+    console.print(f"\n[green]✓[/green] Voyage [bold]{voyage.id}[/bold] launched")
+    if repo:
+        console.print(f"  Repo: {voyage.repo}")
+        console.print(f"  Branch: {voyage.branch}")
+    console.print("  Ships: 1")
+    console.print("\nClaude awaits your command. Attach with:")
+    console.print(f"  [dim]ocaptain shell {voyage.id}[/dim]")
 
 
 @app.command()

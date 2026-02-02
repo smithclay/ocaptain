@@ -6,7 +6,7 @@
 
 > O Captain! my Captain! our fearful Claude Code session is done, The repo has weather'd every rack, the prize we sought is won.
 
-Minimalist multi-coding agent control plane built on [sprites.dev](https://sprites.dev) VMs with [Tailscale](https://tailscale.com) mesh networking. Orchestration is managed by Claude Code's built-in [task list](https://x.com/trq212/status/2014480496013803643?s=20) feature: work is distributed by the `ocaptain` CLI to cloud VMs ("ships") that work in parallel on a plan you generate with Claude.
+Minimalist multi-coding agent control plane built on [sprites.dev](https://sprites.dev) (fly.io) or [exe.dev](https://exe.dev) VMs with [Tailscale](https://tailscale.com) mesh networking. Orchestration is managed by Claude Code's built-in [task list](https://x.com/trq212/status/2014480496013803643?s=20) feature: work is distributed by the `ocaptain` CLI to cloud VMs ("ships") that work in parallel on a plan you generate with Claude.
 
 No Kubernetes, no local sandboxes, no containers, no asking for permissions.
 
@@ -23,7 +23,7 @@ No Kubernetes, no local sandboxes, no containers, no asking for permissions.
 
 ## What it does
 
-Provisions a fleet of VMs on sprites.dev, each running an autonomous Claude Code agent. Ships sync files via Mutagen and coordinate through a shared task list—no central scheduler, just agents racing to complete work.
+Provisions a fleet of VMs on sprites.dev (fly.io) or exe.dev, each running an autonomous Claude Code agent. Ships sync files via Mutagen and coordinate through a shared task list—no central scheduler, just agents racing to complete work.
 
 ```
 You (local) → ocaptain sail → sprites.dev VMs → Ships claim tasks → Code syncs back
@@ -42,7 +42,7 @@ You (local) → ocaptain sail → sprites.dev VMs → Ships claim tasks → Code
 
 ### Prerequisites
 
-1. [sprites.dev](https://sprites.dev) account with `sprite` CLI installed or [exe.dev](https://exe.dev) account.
+1. [sprites.dev](https://sprites.dev) account with `sprite` CLI installed **or** [exe.dev](https://exe.dev) account.
 2. [Tailscale](https://tailscale.com) installed and running
 3. [Mutagen](https://mutagen.io) installed (`brew install mutagen-io/mutagen/mutagen`)
 4. Claude Code long-lived OAuth token (subscription required, from `claude setup-token`)
@@ -67,7 +67,7 @@ export CLAUDE_CODE_OAUTH_TOKEN="your-token-here"
 # Tailscale OAuth secret (for ephemeral ship auth keys)
 export OCAPTAIN_TAILSCALE_OAUTH_SECRET="tskey-client-xxxx"
 
-# sprites.dev org
+# VM provider org (sprites.dev or exe.dev)
 export OCAPTAIN_SPRITES_ORG="your-org"
 
 # Optional: GitHub token for private repos
@@ -139,7 +139,7 @@ flowchart TB
         TS[100.x.x.x]
     end
 
-    subgraph Sprites["sprites.dev or exe.dev"]
+    subgraph Sprites["sprites.dev (fly.io) or exe.dev"]
         subgraph Fleet["Ship VMs"]
             S0[Ship 0<br/>Claude Code]
             S1[Ship 1<br/>Claude Code]
@@ -158,7 +158,7 @@ flowchart TB
 | Component | Description |
 |-----------|-------------|
 | **Local Voyages** | `~/voyages/<voyage-id>/` contains workspace, tasks, logs, and artifacts |
-| **Ship VMs** | sprites.dev VMs running Claude Code autonomously in tmux sessions |
+| **Ship VMs** | sprites.dev (fly.io) or exe.dev VMs running Claude Code autonomously in tmux sessions |
 | **Tailscale Mesh** | Ships join tailnet with ephemeral keys for direct connectivity |
 | **Mutagen Sync** | Two-way file sync between laptop and ships (workspace + tasks) |
 | **Task List** | Shared JSON files in `~/.claude/tasks/`. Ships race to claim pending tasks |
@@ -279,11 +279,15 @@ ocaptain telemetry-stop
 |----------|----------|-------------|
 | `CLAUDE_CODE_OAUTH_TOKEN` | Yes | Claude Code authentication token |
 | `OCAPTAIN_TAILSCALE_OAUTH_SECRET` | Yes | Tailscale OAuth secret for ephemeral keys |
-| `OCAPTAIN_SPRITES_ORG` | Yes | sprites.dev organization name |
+| `OCAPTAIN_SPRITES_ORG` | Yes | VM provider organization name (sprites.dev or exe.dev) |
 | `GH_TOKEN` | No | GitHub token for private repos |
 | `OCAPTAIN_DEFAULT_SHIPS` | No | Default ship count (default: `3`) |
 
-### sprites.dev Setup
+### VM Provider Setup
+
+ocaptain supports two VM providers. Choose one:
+
+#### sprites.dev (fly.io)
 
 Install the `sprite` CLI and authenticate:
 
@@ -293,6 +297,14 @@ sprite list -o your-org
 
 # Create a test sprite
 sprite create -o your-org test-sprite
+```
+
+#### exe.dev
+
+Access via `ssh`:
+
+```bash
+ssh exe.dev
 ```
 
 ### Tailscale Setup
